@@ -39,6 +39,21 @@ BROWSER_HEADERS = {
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def _guess_mime(data: bytes) -> str:
+    """Detect image MIME type from the first few bytes."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if data[:2] == b'\xff\xd8':
+        return "image/jpeg"
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return "image/webp"
+    if data[:3] == b'GIF':
+        return "image/gif"
+    if data[:4] == b'\x00\x00\x01\x00':
+        return "image/x-icon"
+    return "image/jpeg"   # fallback
+
+
 def _get_image_bytes(body: dict) -> tuple[bytes, str]:
     """Returns (image_bytes, filename)."""
     if "imageBase64" in body:
@@ -101,19 +116,21 @@ def main(context):
             raw = raw.decode("utf-8")
         body = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return context.res.json({"success": False, "error": f"Invalid JSON: {exc}"}, status=400)
+        return context.res.json({"success": False, "error": f"Invalid JSON: {exc}"}, status_code=400)
 
     # ── Resolve image bytes ───────────────────────────────────────────────────
     try:
         image_bytes, filename = _get_image_bytes(body)
         context.log(f"Image resolved — {len(image_bytes)} bytes.")
     except (ValueError, Exception) as exc:
-        return context.res.json({"success": False, "error": str(exc)}, status=400)
+        return context.res.json({"success": False, "error": str(exc)}, status_code=400)
 
     # ── Call EasyOCR API ──────────────────────────────────────────────────────
     try:
         language = body.get("language", "en")
-        files = {"file": (filename, image_bytes, "image/jpeg")}
+        mime = _guess_mime(image_bytes)
+        files = {"file": (filename, image_bytes, mime)}
+        context.log(f"Detected MIME: {mime}")
         data  = {"lang": language}
 
         resp = requests.post(
@@ -136,7 +153,7 @@ def main(context):
     except requests.HTTPError as exc:
         err = f"EasyOCR API HTTP {exc.response.status_code}: {exc.response.text}"
         context.error(err)
-        return context.res.json({"success": False, "error": err}, status=502)
+        return context.res.json({"success": False, "error": err}, status_code=502)
     except Exception as exc:
         context.error(f"EasyOCR API error: {exc}")
-        return context.res.json({"success": False, "error": str(exc)}, status=502)
+        return context.res.json({"success": False, "error": str(exc)}, status_code=502)
