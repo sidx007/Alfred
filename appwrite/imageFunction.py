@@ -45,8 +45,18 @@ def main(context):
             timeout=30
         )
         resp.raise_for_status()
-        
-        return context.res.json({"success": True, "data": resp.json()}, 200)
+
+        # Extract only the text into a clean paragraph
+        ocr_result = resp.json()
+        extracted_text = ""
+        if "words" in ocr_result:
+            words = [item["text"] for item in ocr_result["words"] if "text" in item]
+            extracted_text = " ".join(words)
+
+        return context.res.json({
+            "success": True,
+            "text": extracted_text,
+        }, 200)
 
     except requests.HTTPError as exc:
         context.error(f"EasyOCR API Error: {exc.response.text}")
