@@ -36,16 +36,34 @@ class MockContext:
     def log(self, msg):   print(f"[LOG]   {msg}")
     def error(self, msg): print(f"[ERROR] {msg}", file=sys.stderr)
 
-# ── Run ───────────────────────────────────────────────────────────────────────
-from imageFunction import main
+# ── Run Image Function ────────────────────────────────────────────────────────
+from imageFunction import main as image_main
 
 # Test with a public image that contains text:
 ctx = MockContext({"imageUrl": "https://raw.githubusercontent.com/JaidedAI/EasyOCR/master/examples/english.png"})
-main(ctx)
+image_main(ctx)
 
 # Or test with a local image as base64:
 # import base64
 # with open("test.jpg", "rb") as f:
 #     b64 = base64.b64encode(f.read()).decode()
 # ctx = MockContext({"imageBase64": b64})
-# main(ctx)
+# image_main(ctx)
+
+# ── Run Audio Function ────────────────────────────────────────────────────────
+from audioFunction import main as audio_main
+
+print("\n" + "=" * 60)
+print("AUDIO FUNCTION TEST")
+print("=" * 60)
+
+# Test with a public audio URL:
+# ctx = MockContext({"audioUrl": "https://dpgr.am/spacewalk.wav"})
+# audio_main(ctx)
+
+# Or test with a local audio file as base64:
+import base64
+with open("recording.m4a", "rb") as f:
+    b64 = base64.b64encode(f.read()).decode()
+ctx = MockContext({"audioBase64": b64, "contentType": "audio/m4a"})
+audio_main(ctx)

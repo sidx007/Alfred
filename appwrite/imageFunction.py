@@ -32,7 +32,6 @@ def main(context):
 
     try:
         image_bytes = _get_image_bytes(body)
-        
         # Use a generic filename to avoid character issues
         files = {"file": ("image.webp", image_bytes, "image/webp")}
         data = {"lang": body.get("language", "en")}
