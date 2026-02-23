@@ -3,23 +3,16 @@ import os
 from dotenv import load_dotenv
 from appwrite.client import Client
 from appwrite.services.functions import Functions
-import base64
+
 load_dotenv()
 
-PROJECT_ID   = os.getenv("APPWRITE_PROJECT_ID", "")
-FUNCTION_ID  = os.getenv("AUDIOFUNCTION_ID", "")
-API_KEY      = os.getenv("APPWRITE_API_KEY", "")
-ENDPOINT     = os.getenv("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
+PROJECT_ID  = os.getenv("APPWRITE_PROJECT_ID", "")
+FUNCTION_ID = os.getenv("VECTOREMBEDFUNCTION_ID", "")
+API_KEY     = os.getenv("APPWRITE_API_KEY", "")
+ENDPOINT    = os.getenv("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
 
 
-def invoke_audio_function(request_body: dict) -> dict:
-    # Strip data URL prefix from base64 if present
-    if "audioBase64" in request_body:
-        raw = request_body["audioBase64"]
-        if "," in raw:
-            raw = raw.split(",", 1)[1]
-        request_body = {**request_body, "audioBase64": raw}
-
+def invoke_embed_function(request_body: dict) -> dict:
     client = Client()
     client.set_endpoint(ENDPOINT)
     client.set_project(PROJECT_ID)
@@ -46,10 +39,20 @@ def invoke_audio_function(request_body: dict) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {"raw": response}
 
+
 if __name__ == "__main__":
-    with open(f"C:\\Users\\User\\Desktop\\projects\\alfred\\appwrite\\audioFunction\\Recording.m4a", "rb") as f:
-        audio_bytes = f.read()
-    print(invoke_audio_function({
-        "audioBase64": base64.b64encode(audio_bytes).decode("utf-8"),
-        "language": "en",
-    }))
+    sample_texts = [
+        "The French Revolution began in 1789 and transformed European politics.",
+        "Machine learning is a subset of artificial intelligence that enables computers to learn from data.",
+        "The Amazon rainforest spans over 5.5 million square kilometres across nine countries.",
+    ]
+    result = invoke_embed_function({
+        "texts": sample_texts,
+        "collection": "test_collection",
+        "metadata": [
+            {"source": "history"},
+            {"source": "technology"},
+            {"source": "geography"},
+        ],
+    })
+    print(json.dumps(result, indent=2))
