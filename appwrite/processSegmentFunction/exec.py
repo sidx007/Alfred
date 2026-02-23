@@ -7,12 +7,12 @@ from appwrite.services.functions import Functions
 load_dotenv()
 
 PROJECT_ID  = os.getenv("APPWRITE_PROJECT_ID", "")
-FUNCTION_ID = os.getenv("VECTORRETRIEVEFUNCTION_ID", "")
+FUNCTION_ID = os.getenv("PROCESSSEGMENTFUNCTION_ID", "")
 API_KEY     = os.getenv("APPWRITE_API_KEY", "")
 ENDPOINT    = os.getenv("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
 
 
-def invoke_retrieve_function(request_body: dict) -> dict:
+def invoke_process_segment(request_body: dict) -> dict:
     client = Client()
     client.set_endpoint(ENDPOINT)
     client.set_project(PROJECT_ID)
@@ -25,6 +25,10 @@ def invoke_retrieve_function(request_body: dict) -> dict:
         method="POST",
     )
 
+    print("--- FULL EXECUTION ---")
+    print(json.dumps(execution, indent=2, default=str))
+    print("--- END ---")
+
     status      = execution.get("status")
     response    = execution.get("responseBody", "")
     status_code = execution.get("responseStatusCode")
@@ -33,7 +37,7 @@ def invoke_retrieve_function(request_body: dict) -> dict:
         print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
         print(f"--- ERRORS ---\n{execution.get('errors', 'No errors')}")
         raise RuntimeError(f"Execution failed: status={status!r}")
-    
+
     if status_code and int(status_code) >= 400:
         print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
         raise RuntimeError(f"HTTP {status_code}: {response}")
@@ -45,9 +49,11 @@ def invoke_retrieve_function(request_body: dict) -> dict:
 
 
 if __name__ == "__main__":
-    result = invoke_retrieve_function({
-        "query": "What is machine learning?",
-        "collection": "test_collection",
-        "topK": 1,
-    })
+    sample_segment = (
+        "Machine learning is a subset of artificial intelligence that enables "
+        "computers to learn from data without being explicitly programmed, with "
+        "key algorithms including decision trees, neural networks, and support "
+        "vector machines."
+    )
+    result = invoke_process_segment({"segment": sample_segment})
     print(json.dumps(result, indent=2))
