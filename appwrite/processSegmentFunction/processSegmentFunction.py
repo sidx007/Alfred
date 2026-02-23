@@ -4,7 +4,7 @@ import uuid
 import requests
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "gemma2-9b-it"
+MODEL = "llama-3.1-8b-instant"
 
 GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001"
 EMBED_DIM = 3072
@@ -17,19 +17,19 @@ You will receive:
 1. "segment": a text passage the user just learned.
 2. "existingTopics": a JSON array of current topic names.
 
-Your job: assign ALL relevant topics to the segment. Each topic must be mutually exclusive — covering a distinct aspect of the segment with no overlap.
+Your job: Assign the MINIMUM number of core topics required to accurately categorize the segment. 
 
-Decision rules (apply in order):
-1. If an existing topic is a strong or reasonable semantic match for any aspect, return it exactly as-is. Prefer reuse over creating new topics.
-2. Only create a new topic if no existing topic comes close in meaning for that aspect. New topics must be 2–5 words, Title Case, and generic enough to reuse (e.g., "Organic Chemistry Basics", not "Benzene Ring Notes").
-3. Each topic in the list must cover a different, non-overlapping facet of the segment.
-4. If the segment is empty, gibberish, or unclassifiable, return: {"topics": [{"topic": "Uncategorized", "isNew": false}]}
+Decision rules (apply in strict order):
+1. Hierarchy Resolution (No Overlap): If multiple topics apply but have a parent/child relationship (e.g., "Business" and "Financial Statements", or "Science" and "Biology"), you MUST assign ONLY the single, broadest parent topic. 
+2. Mutual Exclusivity: Each assigned topic must represent a completely distinct, non-overlapping domain. 
+3. Reuse First: If an existing topic in the array captures the core theme, use it exactly as-is. Do not create a new topic if an existing one is a 70%+ match.
+4. New Topic Creation: Only create a new topic if no existing topic applies. New topics must be 2-5 words, Title Case, and represent broad, highly reusable macro-categories (e.g., "Corporate Finance", not "QonQ Revenue Growth").
+5. Fallback: If the segment is empty, gibberish, or unclassifiable, return: {"topics": [{"topic": "Uncategorized", "isNew": false}]}
 
 Return ONLY valid JSON — no markdown, no explanation:
 {
   "topics": [
-    {"topic": "<topic name>", "isNew": true | false},
-    ...
+    {"topic": "<topic name>", "isNew": true | false}
   ]
 }
 """
