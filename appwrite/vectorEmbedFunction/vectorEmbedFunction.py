@@ -4,7 +4,7 @@ import uuid
 import requests
 
 GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001"
-EMBED_DIM = 768
+EMBED_DIM = 3072
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

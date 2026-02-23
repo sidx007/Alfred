@@ -25,13 +25,21 @@ def invoke_embed_function(request_body: dict) -> dict:
         method="POST",
     )
 
+    print("--- FULL EXECUTION ---")
+    print(json.dumps(execution, indent=2, default=str))
+    print("--- END ---")
+
     status      = execution.get("status")
     response    = execution.get("responseBody", "")
     status_code = execution.get("responseStatusCode")
 
     if status != "completed":
+        print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
+        print(f"--- ERRORS ---\n{execution.get('errors', 'No errors')}")
         raise RuntimeError(f"Execution failed: status={status!r}")
+    
     if status_code and int(status_code) >= 400:
+        print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
         raise RuntimeError(f"HTTP {status_code}: {response}")
 
     try:

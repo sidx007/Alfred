@@ -30,8 +30,12 @@ def invoke_retrieve_function(request_body: dict) -> dict:
     status_code = execution.get("responseStatusCode")
 
     if status != "completed":
+        print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
+        print(f"--- ERRORS ---\n{execution.get('errors', 'No errors')}")
         raise RuntimeError(f"Execution failed: status={status!r}")
+    
     if status_code and int(status_code) >= 400:
+        print(f"--- LOGS ---\n{execution.get('logs', 'No logs')}")
         raise RuntimeError(f"HTTP {status_code}: {response}")
 
     try:
