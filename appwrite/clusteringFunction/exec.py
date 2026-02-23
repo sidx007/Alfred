@@ -42,14 +42,29 @@ def invoke_clustering_function(request_body: dict) -> dict:
 
 if __name__ == "__main__":
     sample_paragraph = (
-        "The French Revolution began in 1789 and fundamentally transformed "
-        "European politics. France is located in Western Europe and shares "
-        "borders with Belgium, Luxembourg, Germany, Switzerland, Italy, Spain, "
-        "and Andorra. The revolution led to the rise of Napoleon Bonaparte, "
-        "who crowned himself Emperor in 1804. Meanwhile, the Alps mountain "
-        "range stretches across eight countries and is home to Mont Blanc, the "
-        "highest peak in Western Europe at 4,808 metres."
+    "The French Revolution began in 1789 and fundamentally transformed European politics, "
+    "leading to the abolition of the monarchy and the rise of radical republican ideals. "
+    "France, located in Western Europe, shares borders with Belgium, Luxembourg, Germany, "
+    "Switzerland, Italy, Spain, and Andorra, and has a population of over 68 million people. "
+    "The revolution gave rise to Napoleon Bonaparte, who crowned himself Emperor in 1804 and "
+    "went on to conquer much of continental Europe before his defeat at the Battle of Waterloo in 1815. "
+    "Meanwhile, the Alps mountain range stretches across eight countries including France, Switzerland, "
+    "Austria, and Italy, and is home to Mont Blanc, the highest peak in Western Europe at 4,808 metres. "
+    "The Industrial Revolution, which began in Britain around 1760, introduced steam-powered machinery "
+    "and mass production, fundamentally changing labor and economic structures across the globe. "
+    "Machine learning is a subset of artificial intelligence that enables computers to learn from data "
+    "without being explicitly programmed, with key algorithms including decision trees, neural networks, "
+    "and support vector machines. "
+    "The human brain contains approximately 86 billion neurons, each forming thousands of synaptic "
+    "connections, making it the most complex biological structure known to science. "
+    "Climate change, driven largely by the burning of fossil fuels since the Industrial Revolution, "
+    "has caused global average temperatures to rise by approximately 1.1 degrees Celsius since 1850. "
+    "The Amazon rainforest spans over 5.5 million square kilometres across nine countries in South America "
+    "and is home to 10 percent of all species on Earth, making it critical to global biodiversity. "
+    "Python is a high-level, interpreted programming language created by Guido van Rossum and first "
+    "released in 1991, widely used today in web development, data science, and artificial intelligence. "
+    "The 2008 global financial crisis, triggered by the collapse of the US housing market and the failure "
+    "of mortgage-backed securities, led to the worst economic recession since the Great Depression of 1929."
     )
-
     result = invoke_clustering_function({"paragraph": sample_paragraph})
-    print(json.dumps(result, indent=2))
+print(json.dumps(result, indent=2))
