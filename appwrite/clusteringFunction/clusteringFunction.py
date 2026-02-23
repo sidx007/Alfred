@@ -13,7 +13,6 @@ Return ONLY valid JSON — no markdown fences, no commentary. Use this exact sch
 {
   "segments": [
     {
-      "topic": "<short topic label>",
       "content": "<the verbatim text belonging to this topic>"
     }
   ]
