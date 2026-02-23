@@ -17,18 +17,20 @@ You will receive:
 1. "segment": a text passage the user just learned.
 2. "existingTopics": a JSON array of current topic names.
 
-Your job: assign the single most relevant topic to the segment.
+Your job: assign ALL relevant topics to the segment. Each topic must be mutually exclusive — covering a distinct aspect of the segment with no overlap.
 
 Decision rules (apply in order):
-1. If an existing topic is a strong or reasonable semantic match, return it exactly as-is. Prefer reuse over creating new topics.
-2. If the segment covers multiple topics, pick the dominant one.
-3. Only create a new topic if no existing topic comes close in meaning. New topics must be 2–5 words, Title Case, and generic enough to reuse (e.g., "Organic Chemistry Basics", not "Benzene Ring Notes").
-4. If the segment is empty, gibberish, or unclassifiable, return: {"topic": "Uncategorized", "isNew": false}
+1. If an existing topic is a strong or reasonable semantic match for any aspect, return it exactly as-is. Prefer reuse over creating new topics.
+2. Only create a new topic if no existing topic comes close in meaning for that aspect. New topics must be 2–5 words, Title Case, and generic enough to reuse (e.g., "Organic Chemistry Basics", not "Benzene Ring Notes").
+3. Each topic in the list must cover a different, non-overlapping facet of the segment.
+4. If the segment is empty, gibberish, or unclassifiable, return: {"topics": [{"topic": "Uncategorized", "isNew": false}]}
 
 Return ONLY valid JSON — no markdown, no explanation:
 {
-  "topic": "<topic name>",
-  "isNew": true | false
+  "topics": [
+    {"topic": "<topic name>", "isNew": true | false},
+    ...
+  ]
 }
 """
 
@@ -101,17 +103,26 @@ def _call_groq(segment: str, existing_topics: list[str], api_key: str) -> dict:
     return json.loads(content)
 
 
-def _embed_text(text: str, api_key: str) -> list[float]:
-    """Embed a single text string via Gemini."""
+def _embed_texts_batch(texts: list[str], api_key: str) -> list[list[float]]:
+    """Embed multiple text strings via Gemini batch API."""
+    if not texts:
+        return []
+    requests_body = [
+        {
+            "model": "models/gemini-embedding-001",
+            "content": {"parts": [{"text": t}]},
+        }
+        for t in texts
+    ]
     resp = requests.post(
-        f"{GEMINI_EMBED_URL}:embedContent",
+        f"{GEMINI_EMBED_URL}:batchEmbedContents",
         params={"key": api_key},
         headers={"Content-Type": "application/json"},
-        json={"content": {"parts": [{"text": text}]}},
-        timeout=30,
+        json={"requests": requests_body},
+        timeout=60,
     )
     resp.raise_for_status()
-    return resp.json()["embedding"]["values"]
+    return [e["values"] for e in resp.json()["embeddings"]]
 
 
 def _ensure_collection(qdrant_url: str, qdrant_key: str):
@@ -133,17 +144,20 @@ def _ensure_collection(qdrant_url: str, qdrant_key: str):
     create_resp.raise_for_status()
 
 
-def _upsert_topic(qdrant_url: str, qdrant_key: str, topic: str, vector: list[float]):
-    """Add a new topic point to the topics collection."""
-    point = {
-        "id": str(uuid.uuid4()),
-        "vector": vector,
-        "payload": {"text": topic},
-    }
+def _upsert_topics(qdrant_url: str, qdrant_key: str, topics: list[str], vectors: list[list[float]]):
+    """Add new topic points to the topics collection."""
+    points = [
+        {
+            "id": str(uuid.uuid4()),
+            "vector": vec,
+            "payload": {"text": topic},
+        }
+        for topic, vec in zip(topics, vectors)
+    ]
     resp = requests.put(
         f"{qdrant_url}/collections/{TOPICS_COLLECTION}/points",
         headers={"api-key": qdrant_key, "Content-Type": "application/json"},
-        json={"points": [point]},
+        json={"points": points},
         timeout=15,
     )
     resp.raise_for_status()
@@ -189,12 +203,11 @@ def main(context):
     # ── Step 2: Label via Llama ─────────────────────────────────────
     try:
         label_result = _call_groq(segment, existing_topics, groq_key)
-        topic = label_result.get("topic", "").strip()
-        is_new = label_result.get("isNew", False)
+        topics_list = label_result.get("topics", [])
 
-        if not topic:
+        if not topics_list:
             return context.res.json(
-                {"success": False, "error": "Model returned empty topic"}, 502
+                {"success": False, "error": "Model returned no topics"}, 502
             )
     except requests.HTTPError as exc:
         context.error(f"Groq API Error: {exc.response.text}")
@@ -207,16 +220,21 @@ def main(context):
             {"success": False, "error": "Invalid response from language model"}, 502
         )
 
-    # ── Step 3: If new topic, embed & store ─────────────────────────
-    if is_new:
+    # ── Step 3: Embed & store any new topics ────────────────────────
+    new_topic_names = [
+        t["topic"] for t in topics_list
+        if t.get("isNew", False) and t.get("topic", "").strip()
+    ]
+
+    if new_topic_names:
         try:
             _ensure_collection(qdrant_url, qdrant_key)
-            vector = _embed_text(topic, gemini_key)
-            _upsert_topic(qdrant_url, qdrant_key, topic, vector)
+            vectors = _embed_texts_batch(new_topic_names, gemini_key)
+            _upsert_topics(qdrant_url, qdrant_key, new_topic_names, vectors)
         except Exception as exc:
-            context.error(f"Failed to store new topic: {exc}")
+            context.error(f"Failed to store new topics: {exc}")
             return context.res.json(
-                {"success": False, "error": f"Failed to store new topic: {exc}"}, 502
+                {"success": False, "error": f"Failed to store new topics: {exc}"}, 502
             )
 
-    return context.res.json({"success": True, "topic": topic, "isNew": is_new}, 200)
+    return context.res.json({"success": True, "topics": topics_list}, 200)
