@@ -5,25 +5,27 @@ import requests
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.3-70b-versatile"
 
-SYSTEM_PROMPT = """You are a paragraph segmentation assistant. 
-Given a single block of text, split it into multiple paragraphs based on the *topic or content type* of each section. 
-Each segment should cover one coherent topic (e.g. History, Geography, Science, Biography, Economics, Opinion, etc.).
+SYSTEM_PROMPT = """You are a text segmentation engine.
 
-Return ONLY valid JSON — no markdown fences, no commentary. Use this exact schema:
+Given a block of text, split it into semantically coherent segments. Each segment must contain sentences that belong to the same subject or idea. When the subject shifts, start a new segment.
+
+Return ONLY valid JSON. No markdown, no explanation. Use this exact schema:
 {
   "segments": [
     {
-      "topic": "<short topic label>",
-      "content": "<the verbatim text belonging to this topic>"
+      "content": "<verbatim sentences belonging to this segment>"
     }
   ]
 }
 
 Rules:
-- Preserve the original wording; do NOT paraphrase or summarise.
-- Every sentence of the original text must appear in exactly one segment.
-- Keep the segments in the same order as the original text.
-- If the entire text is about one topic, return a single segment."""
+- Copy sentences exactly as they appear. Do NOT paraphrase, summarise, or rewrite.
+- Every sentence must appear in exactly one segment. No sentence can be skipped or duplicated.
+- Segments must appear in the same order as the original text.
+- Split as granularly as the content demands — do not force unrelated ideas into one segment just to reduce count.
+- If two sentences mention the same named entity (e.g. a country, a person) but are about different ideas, they belong in separate segments.
+- If the entire text is about one topic, return a single segment.
+- Do not add any keys, fields, or metadata beyond what the schema specifies."""
 
 
 def _call_groq(paragraph: str, api_key: str) -> dict:
