@@ -52,7 +52,7 @@ if __name__ == "__main__":
     sample_segment = (
         "Nothing Phone company has been progressing very well in the past few years."
         "the qonq growth has been very good and net revenue has been positive."
-
+    
     )
     result = invoke_process_segment({"segment": sample_segment})
     print(json.dumps(result, indent=2))
