@@ -11,28 +11,26 @@ EMBED_DIM = 3072
 
 TOPICS_COLLECTION = "topics"
 
-SYSTEM_PROMPT = """You are a topic labelling engine.
+SYSTEM_PROMPT = """You are a topic classification engine for a learning app.
 
 You will receive:
-1. A text segment.
-2. A JSON list of existing topic names.
+1. "segment": a text passage the user just learned.
+2. "existingTopics": a JSON array of current topic names.
 
-Your task: decide which topic best describes the text segment.
+Your job: assign the single most relevant topic to the segment.
 
-- If the segment clearly belongs to one of the existing topics, return that exact topic name.
-- If no existing topic fits, create a short, descriptive new topic name (2-5 words, title case).
+Decision rules (apply in order):
+1. If an existing topic is a strong or reasonable semantic match, return it exactly as-is. Prefer reuse over creating new topics.
+2. If the segment covers multiple topics, pick the dominant one.
+3. Only create a new topic if no existing topic comes close in meaning. New topics must be 2–5 words, Title Case, and generic enough to reuse (e.g., "Organic Chemistry Basics", not "Benzene Ring Notes").
+4. If the segment is empty, gibberish, or unclassifiable, return: {"topic": "Uncategorized", "isNew": false}
 
-Return ONLY valid JSON. No markdown, no explanation. Use this exact schema:
+Return ONLY valid JSON — no markdown, no explanation:
 {
   "topic": "<topic name>",
   "isNew": true | false
 }
-
-Rules:
-- "isNew" must be false if you chose an existing topic, true if you invented a new one.
-- Prefer existing topics when there is a reasonable match — do not create duplicates.
-- The topic name must be concise and descriptive.
-- Do not return anything other than the JSON object."""
+"""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

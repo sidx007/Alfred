@@ -50,10 +50,9 @@ def invoke_process_segment(request_body: dict) -> dict:
 
 if __name__ == "__main__":
     sample_segment = (
-        "Machine learning is a subset of artificial intelligence that enables "
-        "computers to learn from data without being explicitly programmed, with "
-        "key algorithms including decision trees, neural networks, and support "
-        "vector machines."
+        "Nothing Phone company has been progressing very well in the past few years."
+        "the qonq growth has been very good and net revenue has been positive."
+
     )
     result = invoke_process_segment({"segment": sample_segment})
     print(json.dumps(result, indent=2))
