@@ -96,9 +96,9 @@ def main(context):
         return context.res.json({"success": False, "error": "Invalid JSON"}, 400)
 
     try:
-        context.log("Building data URI...")
-        data_uri = _get_base64_data_uri(body)
-        context.log(f"Data URI length: {len(data_uri)} chars")
+        context.log("Building data URI (with compression)...")
+        data_uri = _get_base64_data_uri(body, context)
+        context.log(f"Data URI length: {len(data_uri)} chars ({len(data_uri) / 1024:.1f} KB)")
 
         lang = body.get("language", "en")
         ocr_lang = _LANG_MAP.get(lang, "eng")
