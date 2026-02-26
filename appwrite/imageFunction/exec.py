@@ -6,9 +6,9 @@ from appwrite.services.functions import Functions
 
 load_dotenv()
 
-PROJECT_ID  = os.getenv("APPWRITE_PROJECT_ID", "")
-FUNCTION_ID = os.getenv("IMAGEFUNCTION_ID", "")
-API_KEY     = os.getenv("APPWRITE_API_KEY", "")
+PROJECT_ID  = os.getenv("EXPO_PUBLIC_APPWRITE_PROJECT_ID", "")
+FUNCTION_ID = os.getenv("EXPO_PUBLIC_IMAGEFUNCTION_ID", "")
+API_KEY     = os.getenv("EXPO_PUBLIC_APPWRITE_API_KEY", "")
 ENDPOINT    = os.getenv("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
 
 
@@ -37,6 +37,13 @@ def invoke_image_function(request_body: dict) -> dict:
     status_code = execution.get("responseStatusCode")
 
     if status != "completed":
+        print("--- FULL EXECUTION ---")
+        print(json.dumps(execution, indent=2, default=str))
+        print("--- LOGS ---")
+        print(execution.get("logs", "(no logs)"))
+        print("--- ERRORS ---")
+        print(execution.get("errors", "(no errors)"))
+        print("--- END ---")
         raise RuntimeError(f"Execution failed: status={status!r}")
     if status_code and int(status_code) >= 400:
         raise RuntimeError(f"HTTP {status_code}: {response}")
