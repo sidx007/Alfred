@@ -1,22 +1,25 @@
 import json
 import os
 import uuid
+import datetime
 import requests
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.1-8b-instant"
 
 GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001"
+GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-flash:generateContent"
 EMBED_DIM = 3072
 
 TOPICS_COLLECTION = "topics"
+MEMORY_COLLECTION = "memory"
+KNOWLEDGE_BASE_COLLECTION = "knowledge_base"
 
 SYSTEM_PROMPT = """You are a topic classification engine for a learning app.
 
 You will receive:
 1. "segment": a text passage the user just learned.
 2. "existingTopics": a JSON array of current topic names.
-
 Your job: Assign the MINIMUM number of core topics required to accurately categorize the segment. 
 
 Decision rules (apply in strict order):
@@ -33,6 +36,15 @@ Return ONLY valid JSON — no markdown, no explanation:
   ]
 }
 """
+
+SEARCH_PROMPT_TEMPLATE = """You are a research assistant. Given a text passage and its classified topics, retrieve detailed, relevant, and accurate information that expands on the passage's content.
+
+Topics: {topics}
+
+Passage:
+{segment}
+
+Provide a comprehensive, well-structured summary of relevant information about this topic. Focus on facts, definitions, key concepts, and recent developments. Be thorough but concise."""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -103,6 +115,42 @@ def _call_groq(segment: str, existing_topics: list[str], api_key: str) -> dict:
     return json.loads(content)
 
 
+def _search_with_gemini(segment: str, topics: list[str], api_key: str) -> str:
+    """Call Gemini 2.0 Flash with Google Search grounding to retrieve relevant info."""
+    topic_str = ", ".join(topics) if topics else "General"
+    prompt = SEARCH_PROMPT_TEMPLATE.format(topics=topic_str, segment=segment)
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "tools": [
+            {"google_search": {}}
+        ],
+    }
+
+    resp = requests.post(
+        GEMINI_GENERATE_URL,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        json=payload,
+        timeout=90,
+    )
+    resp.raise_for_status()
+
+    data = resp.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        return ""
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts)
+
+
 def _embed_texts_batch(texts: list[str], api_key: str) -> list[list[float]]:
     """Embed multiple text strings via Gemini batch API."""
     if not texts:
@@ -125,23 +173,55 @@ def _embed_texts_batch(texts: list[str], api_key: str) -> list[list[float]]:
     return [e["values"] for e in resp.json()["embeddings"]]
 
 
-def _ensure_collection(qdrant_url: str, qdrant_key: str):
-    """Create the topics collection if it does not already exist."""
+def _ensure_collection(qdrant_url: str, qdrant_key: str, collection_name: str):
+    """Create a Qdrant collection if it does not already exist."""
     headers = {"api-key": qdrant_key, "Content-Type": "application/json"}
 
     check = requests.get(
-        f"{qdrant_url}/collections/{TOPICS_COLLECTION}", headers=headers, timeout=10
+        f"{qdrant_url}/collections/{collection_name}", headers=headers, timeout=10
     )
     if check.status_code == 200:
         return
 
     create_resp = requests.put(
-        f"{qdrant_url}/collections/{TOPICS_COLLECTION}",
+        f"{qdrant_url}/collections/{collection_name}",
         headers=headers,
         json={"vectors": {"size": EMBED_DIM, "distance": "Cosine"}},
         timeout=15,
     )
     create_resp.raise_for_status()
+
+
+def _upsert_to_collection(
+    qdrant_url: str,
+    qdrant_key: str,
+    collection: str,
+    texts: list[str],
+    vectors: list[list[float]],
+    metadata_list: list[dict],
+) -> int:
+    """Upsert embedded points into a Qdrant collection. Returns count of points inserted."""
+    points = []
+    for i, (text, vec) in enumerate(zip(texts, vectors)):
+        payload = {"text": text}
+        if i < len(metadata_list):
+            payload.update(metadata_list[i])
+        points.append(
+            {
+                "id": str(uuid.uuid4()),
+                "vector": vec,
+                "payload": payload,
+            }
+        )
+
+    resp = requests.put(
+        f"{qdrant_url}/collections/{collection}/points",
+        headers={"api-key": qdrant_key, "Content-Type": "application/json"},
+        json={"points": points},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return len(points)
 
 
 def _upsert_topics(qdrant_url: str, qdrant_key: str, topics: list[str], vectors: list[list[float]]):
@@ -166,6 +246,8 @@ def _upsert_topics(qdrant_url: str, qdrant_key: str, topics: list[str], vectors:
 # ── Appwrite entry point ────────────────────────────────────────────
 
 def main(context):
+    today = datetime.date.today().isoformat()
+
     # ── Parse request body ──────────────────────────────────────────
     try:
         body = context.req.body
@@ -220,7 +302,60 @@ def main(context):
             {"success": False, "error": "Invalid response from language model"}, 502
         )
 
-    # ── Step 3: Embed & store any new topics ────────────────────────
+    topic_names = [t["topic"] for t in topics_list if t.get("topic", "").strip()]
+    topic_str = ", ".join(topic_names) if topic_names else "General"
+
+    context.log(f"Segment labelled with topics: {topic_str}")
+
+    # ── Step 3: Gemini Search Retrieval ─────────────────────────────
+    search_result = ""
+    try:
+        search_result = _search_with_gemini(segment, topic_names, gemini_key)
+        context.log(f"Gemini search returned {len(search_result)} chars")
+    except Exception as exc:
+        context.error(f"Gemini search failed (non-fatal): {exc}")
+        # Non-fatal — we still store the segment in memory even if search fails
+
+    # ── Step 4: Embed segment → memory collection ───────────────────
+    memory_stored = 0
+    try:
+        # Build text to embed: segment enriched with topic context
+        memory_text = f"[Topics: {topic_str}] {segment}"
+        memory_metadata = [{"topic": topic_str, "date": today}]
+
+        _ensure_collection(qdrant_url, qdrant_key, MEMORY_COLLECTION)
+        mem_vectors = _embed_texts_batch([memory_text], gemini_key)
+        memory_stored = _upsert_to_collection(
+            qdrant_url, qdrant_key, MEMORY_COLLECTION,
+            [memory_text], mem_vectors, memory_metadata,
+        )
+        context.log(f"Stored {memory_stored} point(s) in '{MEMORY_COLLECTION}'")
+    except Exception as exc:
+        context.error(f"Failed to store in memory: {exc}")
+        return context.res.json(
+            {"success": False, "error": f"Failed to store segment in memory: {exc}"}, 502
+        )
+
+    # ── Step 5: Embed search result → knowledge_base collection ────
+    kb_stored = 0
+    if search_result.strip():
+        try:
+            kb_metadata = [{"topic": topic_str, "date": today}]
+
+            _ensure_collection(qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION)
+            kb_vectors = _embed_texts_batch([search_result], gemini_key)
+            kb_stored = _upsert_to_collection(
+                qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION,
+                [search_result], kb_vectors, kb_metadata,
+            )
+            context.log(f"Stored {kb_stored} point(s) in '{KNOWLEDGE_BASE_COLLECTION}'")
+        except Exception as exc:
+            context.error(f"Failed to store in knowledge_base: {exc}")
+            return context.res.json(
+                {"success": False, "error": f"Failed to store in knowledge_base: {exc}"}, 502
+            )
+
+    # ── Step 6: Embed & store any new topics ────────────────────────
     new_topic_names = [
         t["topic"] for t in topics_list
         if t.get("isNew", False) and t.get("topic", "").strip()
@@ -228,13 +363,23 @@ def main(context):
 
     if new_topic_names:
         try:
-            _ensure_collection(qdrant_url, qdrant_key)
+            _ensure_collection(qdrant_url, qdrant_key, TOPICS_COLLECTION)
             vectors = _embed_texts_batch(new_topic_names, gemini_key)
             _upsert_topics(qdrant_url, qdrant_key, new_topic_names, vectors)
+            context.log(f"Stored {len(new_topic_names)} new topic(s)")
         except Exception as exc:
             context.error(f"Failed to store new topics: {exc}")
             return context.res.json(
                 {"success": False, "error": f"Failed to store new topics: {exc}"}, 502
             )
 
-    return context.res.json({"success": True, "topics": topics_list}, 200)
+    return context.res.json(
+        {
+            "success": True,
+            "topics": topics_list,
+            "searchResult": search_result[:500] if search_result else "",
+            "memoryStored": memory_stored,
+            "knowledgeBaseStored": kb_stored,
+        },
+        200,
+    )
