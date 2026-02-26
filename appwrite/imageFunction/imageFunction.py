@@ -1,9 +1,12 @@
 import base64
+import io
 import json
 import os
 import requests
+from PIL import Image
 
 OCR_SPACE_URL = "https://api.ocr.space/parse/image"
+MAX_FILE_KB = 1024
 
 # Language mapping: short codes -> OCR.space engine-1 language codes
 _LANG_MAP = {
@@ -13,23 +16,71 @@ _LANG_MAP = {
 }
 
 
-def _get_base64_data_uri(body: dict) -> str:
-    """Return a data-URI string (data:image/png;base64,...) from the request body."""
+def _compress_image_bytes(img_bytes: bytes, max_kb: int = MAX_FILE_KB) -> tuple[bytes, str]:
+    """Compress image to fit under max_kb. Returns (compressed_bytes, mime_type)."""
+    img = Image.open(io.BytesIO(img_bytes))
+    # Convert RGBA/palette to RGB for JPEG
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+
+    # If already small enough as PNG, return as-is
+    if len(img_bytes) <= max_kb * 1024:
+        return img_bytes, "image/png"
+
+    # Try JPEG at decreasing quality
+    for quality in (85, 70, 50, 35, 20):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= max_kb * 1024:
+            return data, "image/jpeg"
+
+    # Still too large — resize down
+    for scale in (0.75, 0.5, 0.35, 0.25):
+        resized = img.resize(
+            (int(img.width * scale), int(img.height * scale)),
+            Image.LANCZOS,
+        )
+        buf = io.BytesIO()
+        resized.save(buf, format="JPEG", quality=50, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= max_kb * 1024:
+            return data, "image/jpeg"
+
+    # Last resort: smallest resize at lowest quality
+    buf = io.BytesIO()
+    resized.save(buf, format="JPEG", quality=20, optimize=True)
+    return buf.getvalue(), "image/jpeg"
+
+
+def _get_base64_data_uri(body: dict, context=None) -> str:
+    """Decode image, compress under 1MB, return as data URI."""
     if "imageBase64" in body:
         raw = body["imageBase64"]
-        # Already a data URI
         if raw.startswith("data:"):
-            return raw
-        # Strip accidental prefix
-        if "," in raw:
             raw = raw.split(",", 1)[1]
-        return f"data:image/png;base64,{raw}"
-    if "imageUrl" in body:
+        elif "," in raw:
+            raw = raw.split(",", 1)[1]
+        img_bytes = base64.b64decode(raw)
+    elif "imageUrl" in body:
         resp = requests.get(body["imageUrl"], timeout=15)
         resp.raise_for_status()
-        b64 = base64.b64encode(resp.content).decode()
-        return f"data:image/png;base64,{b64}"
-    raise ValueError("Missing image data")
+        img_bytes = resp.content
+    else:
+        raise ValueError("Missing image data")
+
+    original_kb = len(img_bytes) / 1024
+    if context:
+        context.log(f"Original image: {original_kb:.1f} KB")
+
+    compressed, mime = _compress_image_bytes(img_bytes)
+    compressed_kb = len(compressed) / 1024
+    if context:
+        context.log(f"Compressed image: {compressed_kb:.1f} KB ({mime})")
+
+    b64 = base64.b64encode(compressed).decode()
+    ext = "jpeg" if "jpeg" in mime else "png"
+    return f"data:image/{ext};base64,{b64}"
 
 
 def main(context):
