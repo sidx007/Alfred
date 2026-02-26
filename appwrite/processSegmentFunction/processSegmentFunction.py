@@ -201,6 +201,23 @@ def _deterministic_id(collection: str, text: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
 
+def _point_exists(qdrant_url: str, qdrant_key: str, collection: str, point_id: str) -> bool:
+    """Check if a point with the given ID already exists in a Qdrant collection."""
+    headers = {"api-key": qdrant_key, "Content-Type": "application/json"}
+    resp = requests.post(
+        f"{qdrant_url}/collections/{collection}/points",
+        headers=headers,
+        json={"ids": [point_id]},
+        timeout=10,
+    )
+    # Collection doesn't exist yet
+    if resp.status_code == 404:
+        return False
+    resp.raise_for_status()
+    points = resp.json().get("result", [])
+    return len(points) > 0
+
+
 def _upsert_to_collection(
     qdrant_url: str,
     qdrant_key: str,
@@ -316,7 +333,26 @@ def main(context):
 
     context.log(f"Segment labelled with topics: {topic_str}")
 
-    # ── Step 3: Gemini Search Retrieval ─────────────────────────────
+    # ── Step 3: Check if segment already exists in memory ─────────
+    segment_id = _deterministic_id(MEMORY_COLLECTION, segment)
+    already_exists = _point_exists(qdrant_url, qdrant_key, MEMORY_COLLECTION, segment_id)
+
+    if already_exists:
+        context.log("Segment already exists in memory — skipping search & storage")
+        return context.res.json(
+            {
+                "success": True,
+                "topics": topics_list,
+                "searchResult": "",
+                "memoryStored": 0,
+                "knowledgeBaseStored": 0,
+                "skipped": True,
+                "reason": "Segment already processed",
+            },
+            200,
+        )
+
+    # ── Step 4: Gemini Search Retrieval ─────────────────────────────
     search_result = ""
     try:
         search_result = _search_with_gemini(segment, topic_names, gemini_key)
@@ -325,7 +361,7 @@ def main(context):
         context.error(f"Gemini search failed (non-fatal): {exc}")
         # Non-fatal — we still store the segment in memory even if search fails
 
-    # ── Step 4: Embed segment → memory collection ───────────────────
+    # ── Step 5: Embed segment → memory collection ───────────────────
     memory_stored = 0
     try:
         memory_metadata = [{"topic": topic_str, "date": today}]
@@ -343,7 +379,7 @@ def main(context):
             {"success": False, "error": f"Failed to store segment in memory: {exc}"}, 502
         )
 
-    # ── Step 5: Embed search result → knowledge_base collection ────
+    # ── Step 6: Embed search result → knowledge_base collection ────
     kb_stored = 0
     if search_result.strip():
         try:
