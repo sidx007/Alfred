@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import uuid
 import datetime
@@ -192,6 +193,14 @@ def _ensure_collection(qdrant_url: str, qdrant_key: str, collection_name: str):
     create_resp.raise_for_status()
 
 
+def _deterministic_id(collection: str, text: str) -> str:
+    """Generate a deterministic UUID from collection name + text content.
+    Same input always produces the same ID, so Qdrant upsert overwrites
+    instead of creating duplicates."""
+    key = f"{collection}::{text}"
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
+
+
 def _upsert_to_collection(
     qdrant_url: str,
     qdrant_key: str,
@@ -200,7 +209,7 @@ def _upsert_to_collection(
     vectors: list[list[float]],
     metadata_list: list[dict],
 ) -> int:
-    """Upsert embedded points into a Qdrant collection. Returns count of points inserted."""
+    """Upsert embedded points into a Qdrant collection. Returns count of points upserted."""
     points = []
     for i, (text, vec) in enumerate(zip(texts, vectors)):
         payload = {"text": text}
@@ -208,7 +217,7 @@ def _upsert_to_collection(
             payload.update(metadata_list[i])
         points.append(
             {
-                "id": str(uuid.uuid4()),
+                "id": _deterministic_id(collection, text),
                 "vector": vec,
                 "payload": payload,
             }
@@ -225,10 +234,10 @@ def _upsert_to_collection(
 
 
 def _upsert_topics(qdrant_url: str, qdrant_key: str, topics: list[str], vectors: list[list[float]]):
-    """Add new topic points to the topics collection."""
+    """Add new topic points to the topics collection (deduplicated by topic name)."""
     points = [
         {
-            "id": str(uuid.uuid4()),
+            "id": _deterministic_id(TOPICS_COLLECTION, topic),
             "vector": vec,
             "payload": {"text": topic},
         }
@@ -319,15 +328,13 @@ def main(context):
     # ── Step 4: Embed segment → memory collection ───────────────────
     memory_stored = 0
     try:
-        # Build text to embed: segment enriched with topic context
-        memory_text = f"[Topics: {topic_str}] {segment}"
         memory_metadata = [{"topic": topic_str, "date": today}]
 
         _ensure_collection(qdrant_url, qdrant_key, MEMORY_COLLECTION)
-        mem_vectors = _embed_texts_batch([memory_text], gemini_key)
+        mem_vectors = _embed_texts_batch([segment], gemini_key)
         memory_stored = _upsert_to_collection(
             qdrant_url, qdrant_key, MEMORY_COLLECTION,
-            [memory_text], mem_vectors, memory_metadata,
+            [segment], mem_vectors, memory_metadata,
         )
         context.log(f"Stored {memory_stored} point(s) in '{MEMORY_COLLECTION}'")
     except Exception as exc:
