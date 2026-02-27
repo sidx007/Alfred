@@ -3,13 +3,7 @@ import React, { useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { COLORS } from "../constants/theme";
-import { scrollQdrantCollection } from "../services/qdrant";
-
-interface ChecklistItem {
-  id: string;
-  task: string;
-  completed: boolean;
-}
+import { type ChecklistItem, fetchChecklist } from "../services/alfredApi";
 
 const FALLBACK_CHECKLIST: ChecklistItem[] = [
   { id: "1", task: "Read a technical article", completed: false },
@@ -26,19 +20,8 @@ export function ChecklistPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    scrollQdrantCollection("checklist")
-      .then((points) => {
-        const fetched: ChecklistItem[] = points
-          .map((p) => ({
-            id: String(p.id),
-            task:
-              (p.payload.task as string) ||
-              (p.payload.text as string) ||
-              (p.payload.title as string) ||
-              "",
-            completed: (p.payload.completed as boolean) ?? false,
-          }))
-          .filter((i) => i.task);
+    fetchChecklist()
+      .then((fetched) => {
         setItems(fetched.length > 0 ? fetched : FALLBACK_CHECKLIST);
       })
       .catch(() => setItems(FALLBACK_CHECKLIST))

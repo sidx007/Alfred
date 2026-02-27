@@ -48,7 +48,7 @@ export function renderHome(container) {
             <textarea
               id="report-prompt-input"
               class="report-prompt-textarea"
-              placeholder="Describe what you'd like a report about… e.g. 'summarise everything I know about machine learning'"
+              placeholder="Describe what you'd like a report about… e.g. 'summarize everything I know about machine learning'"
               rows="3"
             ></textarea>
             <button class="panel-btn" id="report-generate-btn">✨ Generate Report</button>

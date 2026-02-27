@@ -2,13 +2,7 @@ import React, { useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { COLORS } from "../constants/theme";
-import { scrollQdrantCollection } from "../services/qdrant";
-
-interface Flashcard {
-  id: string;
-  question: string;
-  answer: string;
-}
+import { type Flashcard, fetchFlashcards } from "../services/alfredApi";
 
 const FALLBACK_FLASHCARDS: Flashcard[] = [
   {
@@ -45,22 +39,8 @@ export function FlashcardsPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    scrollQdrantCollection("flashcards")
-      .then((points) => {
-        const cards: Flashcard[] = points
-          .map((p) => ({
-            id: String(p.id),
-            question:
-              (p.payload.question as string) ||
-              (p.payload.front as string) ||
-              (p.payload.text as string) ||
-              "",
-            answer:
-              (p.payload.answer as string) ||
-              (p.payload.back as string) ||
-              "",
-          }))
-          .filter((c) => c.question);
+    fetchFlashcards()
+      .then((cards) => {
         setDeck(cards.length > 0 ? cards : FALLBACK_FLASHCARDS);
       })
       .catch(() => setDeck(FALLBACK_FLASHCARDS))
