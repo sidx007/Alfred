@@ -1,0 +1,51 @@
+{
+  "cli": {
+    "version": ">= 18.0.5",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": false,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_APPWRITE_ENDPOINT": "https://sgp.cloud.appwrite.io/v1",
+        "EXPO_PUBLIC_APPWRITE_PROJECT_ID": "6999dd6d002cd940c068",
+        "EXPO_PUBLIC_APPWRITE_API_KEY": "standard_f521b3b7cd35fb27980d8baba62674e67309e8cb93b5fcdc1d239126f0a61ed4a679078c86f85fcc5c897ab2422fde2fc40184be1aed15466867db7006e8143fe83b8d837dcbb417740e8eb95e73cfa2b2f7d4f9a444262aa8cd8061a2418dfe59355ffc897e3635f4dd5d771fdacda0f27b00b6d8ce207fb7aa58ed3d981964",
+        "EXPO_PUBLIC_IMAGEFUNCTION_ID": "6999e00d0005134cf882",
+        "EXPO_PUBLIC_AUDIOFUNCTION_ID": "699a972c0027fdb3a1d8",
+        "EXPO_PUBLIC_CLUSTERINGFUNCTION_ID": "699ad04a0015f4239b04",
+        "EXPO_PUBLIC_PROCESSSEGMENTFUNCTION_ID": "699c0181003740b21abb"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_APPWRITE_ENDPOINT": "https://sgp.cloud.appwrite.io/v1",
+        "EXPO_PUBLIC_APPWRITE_PROJECT_ID": "6999dd6d002cd940c068",
+        "EXPO_PUBLIC_APPWRITE_API_KEY": "standard_f521b3b7cd35fb27980d8baba62674e67309e8cb93b5fcdc1d239126f0a61ed4a679078c86f85fcc5c897ab2422fde2fc40184be1aed15466867db7006e8143fe83b8d837dcbb417740e8eb95e73cfa2b2f7d4f9a444262aa8cd8061a2418dfe59355ffc897e3635f4dd5d771fdacda0f27b00b6d8ce207fb7aa58ed3d981964",
+        "EXPO_PUBLIC_IMAGEFUNCTION_ID": "6999e00d0005134cf882",
+        "EXPO_PUBLIC_AUDIOFUNCTION_ID": "699a972c0027fdb3a1d8",
+        "EXPO_PUBLIC_CLUSTERINGFUNCTION_ID": "699ad04a0015f4239b04",
+        "EXPO_PUBLIC_PROCESSSEGMENTFUNCTION_ID": "699c0181003740b21abb"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_APPWRITE_ENDPOINT": "https://sgp.cloud.appwrite.io/v1",
+        "EXPO_PUBLIC_APPWRITE_PROJECT_ID": "6999dd6d002cd940c068",
+        "EXPO_PUBLIC_APPWRITE_API_KEY": "standard_f521b3b7cd35fb27980d8baba62674e67309e8cb93b5fcdc1d239126f0a61ed4a679078c86f85fcc5c897ab2422fde2fc40184be1aed15466867db7006e8143fe83b8d837dcbb417740e8eb95e73cfa2b2f7d4f9a444262aa8cd8061a2418dfe59355ffc897e3635f4dd5d771fdacda0f27b00b6d8ce207fb7aa58ed3d981964",
+        "EXPO_PUBLIC_IMAGEFUNCTION_ID": "6999e00d0005134cf882",
+        "EXPO_PUBLIC_AUDIOFUNCTION_ID": "699a972c0027fdb3a1d8",
+        "EXPO_PUBLIC_CLUSTERINGFUNCTION_ID": "699ad04a0015f4239b04",
+        "EXPO_PUBLIC_PROCESSSEGMENTFUNCTION_ID": "699c0181003740b21abb"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

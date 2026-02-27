@@ -6,9 +6,9 @@ from appwrite.services.functions import Functions
 
 load_dotenv()
 
-PROJECT_ID  = os.getenv("APPWRITE_PROJECT_ID", "")
+PROJECT_ID  = os.getenv("EXPO_PUBLIC_APPWRITE_PROJECT_ID", "")
 FUNCTION_ID = os.getenv("VECTORRETRIEVEFUNCTION_ID", "")
-API_KEY     = os.getenv("APPWRITE_API_KEY", "")
+API_KEY     = os.getenv("EXPO_PUBLIC_APPWRITE_API_KEY", "")
 ENDPOINT    = os.getenv("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
 
 
