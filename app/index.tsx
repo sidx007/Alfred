@@ -3,27 +3,33 @@ import React, { useCallback, useState } from "react";
 import { Dimensions, StatusBar, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
-  interpolate,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
+    interpolate,
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
 } from "react-native-reanimated";
 
+import { AudioPickerSheet } from "../components/AudioPickerSheet";
 import { CardItem } from "../components/CardItem";
 import { ChecklistPanel } from "../components/ChecklistPanel";
 import { FlashcardsPanel } from "../components/FlashcardsPanel";
+import { ImagePickerSheet } from "../components/ImagePickerSheet";
 import { SwipeDownArrow } from "../components/SwipeDownArrow";
 import { SwipeUpArrow } from "../components/SwipeUpArrow";
+import { TextInputModal } from "../components/TextInputModal";
+import { UploadDetailModal } from "../components/UploadDetailModal";
+import { UploadStatusButton } from "../components/UploadStatusButton";
 import { items } from "../constants/items";
 import {
-  CARD_HEIGHT,
-  CARD_WIDTH,
-  SNAP_THRESHOLD,
-  SPACING,
-  SPRING_CONFIG,
+    CARD_HEIGHT,
+    CARD_WIDTH,
+    SNAP_THRESHOLD,
+    SPACING,
+    SPRING_CONFIG,
 } from "../constants/layout";
 import { COLORS } from "../constants/theme";
+import { useUpload } from "../context/UploadContext";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD = 60;
@@ -40,6 +46,15 @@ const mediumHaptic = () =>
   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
 export default function Index() {
+  // ── Upload context ──
+  const { uploadText, uploadAudio, uploadImages } = useUpload();
+
+  // ── Modal state ──
+  const [textModalVisible, setTextModalVisible] = useState(false);
+  const [imageModalVisible, setImageModalVisible] = useState(false);
+  const [audioModalVisible, setAudioModalVisible] = useState(false);
+  const [detailModalVisible, setDetailModalVisible] = useState(false);
+
   // ── Vertical page position — starts on home ──
   const pageOffset = useSharedValue(PAGE_HOME);
 
@@ -55,6 +70,33 @@ export default function Index() {
 
   const centerX = (layout.width - CARD_WIDTH) / 2;
   const centerY = (layout.height - CARD_HEIGHT) / 2;
+
+  // ── Card tap handler ──
+  const handleCardTap = useCallback(() => {
+    const count = items.length;
+    const snapped = ((Math.round(currentIndex.value) % count) + count) % count;
+    const card = items[snapped];
+    if (!card) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    switch (card.label) {
+      case "Text":
+        setTextModalVisible(true);
+        break;
+      case "Audio":
+        setAudioModalVisible(true);
+        break;
+      case "Image":
+        setImageModalVisible(true);
+        break;
+    }
+  }, [currentIndex]);
+
+  // ── Upload status press handler ──
+  const handleUploadPress = useCallback(() => {
+    setDetailModalVisible(true);
+  }, []);
 
   // ── Profile gesture: swipe up → home ──
   const profilePan = Gesture.Pan()
@@ -75,6 +117,10 @@ export default function Index() {
     });
 
   // ── Home gesture: horizontal cards + vertical page swipe ──
+  const homeTap = Gesture.Tap().onEnd(() => {
+    runOnJS(handleCardTap)();
+  });
+
   const homePan = Gesture.Pan()
     .onUpdate((e) => {
       dragX.value = e.translationX;
@@ -184,7 +230,7 @@ export default function Index() {
         </GestureDetector>
 
         {/* ── Home (middle) ── */}
-        <GestureDetector gesture={homePan}>
+        <GestureDetector gesture={Gesture.Race(homePan, homeTap)}>
           <Animated.View
             style={[styles.page, homeAnimStyle]}
             onLayout={onContainerLayout}
@@ -213,7 +259,9 @@ export default function Index() {
               </View>
             </View>
 
-            <View style={styles.bottomContent} pointerEvents="none">
+            <View style={styles.bottomContent} pointerEvents="box-none">
+              <UploadStatusButton onPress={handleUploadPress} />
+              <View style={{ height: 12 }} />
               <SwipeUpArrow />
             </View>
           </Animated.View>
@@ -226,6 +274,27 @@ export default function Index() {
           </Animated.View>
         </GestureDetector>
       </Animated.View>
+
+      {/* ── Modals ── */}
+      <TextInputModal
+        visible={textModalVisible}
+        onClose={() => setTextModalVisible(false)}
+        onSubmit={(text) => uploadText(text)}
+      />
+      <ImagePickerSheet
+        visible={imageModalVisible}
+        onClose={() => setImageModalVisible(false)}
+        onSubmit={(images) => uploadImages(images)}
+      />
+      <AudioPickerSheet
+        visible={audioModalVisible}
+        onClose={() => setAudioModalVisible(false)}
+        onSubmit={(b64, ct) => uploadAudio(b64, ct)}
+      />
+      <UploadDetailModal
+        visible={detailModalVisible}
+        onClose={() => setDetailModalVisible(false)}
+      />
     </View>
   );
 }

@@ -38,6 +38,9 @@ yarn-error.*
 .env
 app-example
 
+# EAS config (contains secrets)
+eas.json
+
 # generated native folders
 /ios
 /android
