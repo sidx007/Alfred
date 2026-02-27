@@ -27,11 +27,18 @@ export async function fetchRevisions() {
     return data.revisions;
 }
 
-export async function generateReport(topics) {
+export async function fetchDailyReport() {
+    const res = await fetch(`${BASE}/daily-report`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Daily report fetch failed");
+    return { report: data.report, date: data.date };
+}
+
+export async function generateReport(prompt) {
     const res = await fetch(`${BASE}/report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topics }),
+        body: JSON.stringify({ prompt }),
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.error || "Report generation failed");

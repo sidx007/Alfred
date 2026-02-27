@@ -1,9 +1,16 @@
-import React, { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { COLORS } from "../constants/theme";
+import { scrollQdrantCollection } from "../services/qdrant";
 
-const FLASHCARDS = [
+interface Flashcard {
+  id: string;
+  question: string;
+  answer: string;
+}
+
+const FALLBACK_FLASHCARDS: Flashcard[] = [
   {
     id: "1",
     question: "What does TCP stand for?",
@@ -33,8 +40,32 @@ const FLASHCARDS = [
 ];
 
 export function FlashcardsPanel() {
-  const [deck, setDeck] = useState(FLASHCARDS);
+  const [deck, setDeck] = useState<Flashcard[]>([]);
   const [revealed, setRevealed] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    scrollQdrantCollection("flashcards")
+      .then((points) => {
+        const cards: Flashcard[] = points
+          .map((p) => ({
+            id: String(p.id),
+            question:
+              (p.payload.question as string) ||
+              (p.payload.front as string) ||
+              (p.payload.text as string) ||
+              "",
+            answer:
+              (p.payload.answer as string) ||
+              (p.payload.back as string) ||
+              "",
+          }))
+          .filter((c) => c.question);
+        setDeck(cards.length > 0 ? cards : FALLBACK_FLASHCARDS);
+      })
+      .catch(() => setDeck(FALLBACK_FLASHCARDS))
+      .finally(() => setLoading(false));
+  }, []);
 
   const card = deck[0];
   const remaining = deck.length;
@@ -45,21 +76,26 @@ export function FlashcardsPanel() {
     setRevealed(false);
     setDeck((prev) => {
       if (prev.length <= 1) {
-        // Reset deck when done
-        return FLASHCARDS;
+        return [...prev];
       }
       const [current, ...rest] = prev;
       if (grade === "again") {
-        // Put card back near the end
         const insertAt = Math.max(rest.length - 1, 0);
         const newDeck = [...rest];
         newDeck.splice(insertAt, 0, current);
         return newDeck;
       }
-      // good / easy — remove from deck
       return rest;
     });
   };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <ActivityIndicator color={COLORS.accent} size="large" />
+      </View>
+    );
+  }
 
   if (!card) return null;
 
@@ -146,6 +182,11 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     paddingTop: 60,
+  },
+  centered: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingTop: 0,
   },
   header: {
     alignItems: "center",
