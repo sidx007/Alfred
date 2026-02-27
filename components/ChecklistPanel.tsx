@@ -1,10 +1,17 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { COLORS } from "../constants/theme";
+import { scrollQdrantCollection } from "../services/qdrant";
 
-const CHECKLIST_ITEMS = [
+interface ChecklistItem {
+  id: string;
+  task: string;
+  completed: boolean;
+}
+
+const FALLBACK_CHECKLIST: ChecklistItem[] = [
   { id: "1", task: "Read a technical article", completed: false },
   { id: "2", task: "Watch a coding tutorial", completed: true },
   { id: "3", task: "Practice a new framework", completed: false },
@@ -15,7 +22,28 @@ const CHECKLIST_ITEMS = [
 ];
 
 export function ChecklistPanel() {
-  const [items, setItems] = useState(CHECKLIST_ITEMS);
+  const [items, setItems] = useState<ChecklistItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    scrollQdrantCollection("checklist")
+      .then((points) => {
+        const fetched: ChecklistItem[] = points
+          .map((p) => ({
+            id: String(p.id),
+            task:
+              (p.payload.task as string) ||
+              (p.payload.text as string) ||
+              (p.payload.title as string) ||
+              "",
+            completed: (p.payload.completed as boolean) ?? false,
+          }))
+          .filter((i) => i.task);
+        setItems(fetched.length > 0 ? fetched : FALLBACK_CHECKLIST);
+      })
+      .catch(() => setItems(FALLBACK_CHECKLIST))
+      .finally(() => setLoading(false));
+  }, []);
 
   const toggleItem = (id: string) => {
     setItems((prev) =>
@@ -35,35 +63,41 @@ export function ChecklistPanel() {
         <Text style={styles.headerTitle}>Daily Checklist</Text>
       </View>
 
-      <View style={styles.listContent}>
-        {items.map((item) => (
-          <TouchableOpacity
-            key={item.id}
-            activeOpacity={0.7}
-            style={[styles.itemRow, item.completed && styles.itemRowCompleted]}
-            onPress={() => toggleItem(item.id)}
-          >
-            <View
-              style={[
-                styles.checkbox,
-                item.completed && styles.checkboxChecked,
-              ]}
+      {loading ? (
+        <View style={styles.loadingArea}>
+          <ActivityIndicator color={COLORS.accent} size="large" />
+        </View>
+      ) : (
+        <View style={styles.listContent}>
+          {items.map((item) => (
+            <TouchableOpacity
+              key={item.id}
+              activeOpacity={0.7}
+              style={[styles.itemRow, item.completed && styles.itemRowCompleted]}
+              onPress={() => toggleItem(item.id)}
             >
-              {item.completed && (
-                <Ionicons name="checkmark" size={16} color={COLORS.bgBase} />
-              )}
-            </View>
-            <Text
-              style={[
-                styles.itemText,
-                item.completed && styles.itemTextCompleted,
-              ]}
-            >
-              {item.task}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+              <View
+                style={[
+                  styles.checkbox,
+                  item.completed && styles.checkboxChecked,
+                ]}
+              >
+                {item.completed && (
+                  <Ionicons name="checkmark" size={16} color={COLORS.bgBase} />
+                )}
+              </View>
+              <Text
+                style={[
+                  styles.itemText,
+                  item.completed && styles.itemTextCompleted,
+                ]}
+              >
+                {item.task}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -72,6 +106,11 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     paddingTop: 50,
+  },
+  loadingArea: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
   },
   dragHandleArea: {
     alignItems: "center",

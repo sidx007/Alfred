@@ -30,6 +30,9 @@ const GEMINI_GENERATE_URL =
 const TOPICS_COLLECTION = "topics";
 const MEMORY_COLLECTION = "memory";
 const KNOWLEDGE_BASE_COLLECTION = "knowledge_base";
+const DAILY_REPORT_COLLECTION = "daily report";
+const FLASHCARDS_COLLECTION = "flashcards";
+const CHECKLIST_COLLECTION = "checklist";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -275,39 +278,90 @@ Instructions:
     }
 });
 
-// POST /api/report — generate report for selected topics
+// GET /api/daily-report — fetch report from daily report collection
+app.get("/api/daily-report", async (req, res) => {
+    try {
+        const points = await scrollAll(DAILY_REPORT_COLLECTION);
+        if (points.length === 0) {
+            return res.json({ success: true, report: null });
+        }
+        // Return the most recent report (sort by date or createdAt if available)
+        const sorted = points.sort((a, b) => {
+            const da = a.payload?.date || a.payload?.createdAt || "";
+            const db = b.payload?.date || b.payload?.createdAt || "";
+            return db.localeCompare(da);
+        });
+        const latest = sorted[0].payload || {};
+        const report = latest.report || latest.content || latest.text || JSON.stringify(latest);
+        res.json({ success: true, report, date: latest.date || latest.createdAt || null });
+    } catch (err) {
+        console.error("GET /api/daily-report error:", err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// GET /api/flashcards — fetch flashcards from flashcards collection
+app.get("/api/flashcards", async (req, res) => {
+    try {
+        const points = await scrollAll(FLASHCARDS_COLLECTION);
+        const flashcards = points
+            .map((p) => ({
+                id: String(p.id),
+                question: p.payload?.question || p.payload?.front || p.payload?.text || "",
+                answer: p.payload?.answer || p.payload?.back || "",
+            }))
+            .filter((f) => f.question);
+        res.json({ success: true, flashcards });
+    } catch (err) {
+        console.error("GET /api/flashcards error:", err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// GET /api/checklist — fetch checklist items from checklist collection
+app.get("/api/checklist", async (req, res) => {
+    try {
+        const points = await scrollAll(CHECKLIST_COLLECTION);
+        const items = points
+            .map((p) => ({
+                id: String(p.id),
+                task: p.payload?.task || p.payload?.text || p.payload?.title || "",
+                completed: p.payload?.completed || false,
+            }))
+            .filter((i) => i.task);
+        res.json({ success: true, items });
+    } catch (err) {
+        console.error("GET /api/checklist error:", err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+
+// POST /api/report — generate a custom report from a user prompt
 app.post("/api/report", async (req, res) => {
     try {
-        const { topics } = req.body;
-        if (!topics?.length) {
+        const { prompt: userPrompt, topics } = req.body;
+
+        // Support both new prompt-based and legacy topics-based calls
+        const queryText = userPrompt?.trim() || (Array.isArray(topics) ? topics.join(", ") : "");
+        if (!queryText) {
             return res
                 .status(400)
-                .json({ success: false, error: "Select at least one topic" });
+                .json({ success: false, error: "A prompt or topics array is required" });
         }
 
-        const topicStr = topics.join(", ");
+        // Embed the query for semantic search
+        const queryVec = await embedText(queryText);
 
-        // Embed the topic query
-        const queryVec = await embedText(topicStr);
-
-        // Search both collections with higher topK for reports
+        // Search both collections
         const [memResults, kbResults] = await Promise.all([
             searchQdrant(MEMORY_COLLECTION, queryVec, 15),
             searchQdrant(KNOWLEDGE_BASE_COLLECTION, queryVec, 15),
         ]);
 
-        // Also do a filtered scroll for exact topic matches
-        const topicFilterResults = [];
-        for (const topic of topics) {
-            const filtered = await scrollAll(MEMORY_COLLECTION, {
-                must: [{ key: "topic", match: { value: topic } }],
-            });
-            topicFilterResults.push(...filtered);
-        }
-
-        // Deduplicate
+        // Deduplicate memory results
         const allTexts = new Map();
-        for (const r of [...memResults, ...topicFilterResults]) {
+        for (const r of memResults) {
             const text = r.payload?.text || "";
             if (text && !allTexts.has(text)) {
                 allTexts.set(text, { text, topic: r.payload?.topic, date: r.payload?.date });
@@ -317,28 +371,28 @@ app.post("/api/report", async (req, res) => {
             .map((r) => r.payload?.text || "")
             .filter(Boolean);
 
-        const prompt = `You are a report generator for a personal knowledge management system. Generate a comprehensive, well-structured report based on the user's notes and knowledge base entries.
+        const geminiPrompt = `You are a report generator for a personal knowledge management system. Generate a comprehensive, well-structured report based on the user's request and their knowledge base.
 
-Selected Topics: ${topicStr}
+User's Report Request: ${queryText}
 
 --- USER'S NOTES ---
 ${[...allTexts.values()]
                 .map((item, i) => `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`)
-                .join("\n\n")}
+                .join("\n\n") || "(No relevant notes found)"}
 
 --- KNOWLEDGE BASE ENTRIES ---
-${kbTexts.map((t, i) => `${i + 1}. ${t}`).join("\n\n")}
+${kbTexts.map((t, i) => `${i + 1}. ${t}`).join("\n\n") || "(No relevant knowledge base entries found)"}
 
 Instructions:
-- Generate a professional, detailed report covering the selected topics.
-- Organize by topic with clear section headers.
+- Generate a professional, detailed report that addresses the user's request.
+- Organize with clear section headers.
 - Include an executive summary at the top.
 - Highlight key insights, trends, and important facts.
 - Use markdown formatting extensively (headers, bullets, bold, tables where appropriate).
 - Include a conclusion section with key takeaways.
-- If data is limited for a topic, mention that and provide what's available.`;
+- If data is limited, mention that and provide what's available.`;
 
-        const report = await callGemini(prompt);
+        const report = await callGemini(geminiPrompt);
 
         res.json({
             success: true,
