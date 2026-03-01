@@ -4,16 +4,18 @@ import datetime
 import requests
 
 MEMORY_COLLECTION = "memory"
+KNOWLEDGE_BASE_COLLECTION = "knowledge_base"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _scroll_memory_chunks(
+def _scroll_and_cluster(
     qdrant_url: str,
     qdrant_key: str,
+    collection: str,
     target_dates: set[str],
 ) -> dict[str, list[str]]:
-    """Scroll the memory collection and return chunk IDs clustered by topic.
+    """Scroll a Qdrant collection and return chunk IDs clustered by topic.
 
     Only points whose payload.date matches one of *target_dates* are included.
     Returns a dict mapping each topic string to a list of point IDs.
@@ -28,7 +30,7 @@ def _scroll_memory_chunks(
             body["offset"] = offset
 
         resp = requests.post(
-            f"{qdrant_url}/collections/{MEMORY_COLLECTION}/points/scroll",
+            f"{qdrant_url}/collections/{collection}/points/scroll",
             headers=headers,
             json=body,
             timeout=15,
@@ -67,6 +69,18 @@ def _scroll_memory_chunks(
     return clustered
 
 
+def _merge_into_result(
+    result: dict[str, dict],
+    clustered: dict[str, list[str]],
+    key: str,
+):
+    """Merge clustered chunk IDs into the combined result dict under *key*."""
+    for topic, ids in clustered.items():
+        if topic not in result:
+            result[topic] = {"memory": [], "knowledgeBase": []}
+        result[topic][key].extend(ids)
+
+
 # ── Appwrite entry point ────────────────────────────────────────────
 
 def main(context):
@@ -88,17 +102,29 @@ def main(context):
 
     context.log(f"Target dates: {sorted(target_dates)}")
 
-    # ── Scroll & cluster ────────────────────────────────────────────
+    # ── Scroll & cluster both collections ───────────────────────────
     try:
-        clustered = _scroll_memory_chunks(qdrant_url, qdrant_key, target_dates)
+        memory_clustered = _scroll_and_cluster(
+            qdrant_url, qdrant_key, MEMORY_COLLECTION, target_dates
+        )
+        kb_clustered = _scroll_and_cluster(
+            qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION, target_dates
+        )
 
-        total_chunks = sum(len(ids) for ids in clustered.values())
+        # Merge into a single dict keyed by topic
+        combined: dict[str, dict] = {}
+        _merge_into_result(combined, memory_clustered, "memory")
+        _merge_into_result(combined, kb_clustered, "knowledgeBase")
+
+        total_mem = sum(len(v["memory"]) for v in combined.values())
+        total_kb = sum(len(v["knowledgeBase"]) for v in combined.values())
         context.log(
-            f"Found {total_chunks} chunk(s) across {len(clustered)} topic(s)"
+            f"Found {total_mem} memory + {total_kb} knowledge_base chunk(s) "
+            f"across {len(combined)} topic(s)"
         )
 
         return context.res.json(
-            {"success": True, "clusteredChunks": clustered}, 200
+            {"success": True, "clusteredChunks": combined}, 200
         )
 
     except requests.HTTPError as exc:
