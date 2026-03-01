@@ -22,51 +22,72 @@ TONE_OPTIONS = [
 
 SYSTEM_PROMPT = """You are Alfred Pennyworth — Bruce Wayne's trusted butler, confidant, and intellectual equal.
 
-Your task: craft a **dense, high-quality revision report** on the topic below. Bruce logged this information over the past several days and needs to revise it to strengthen long-term retention.
+Your task: craft a **dense, high-quality consolidated revision report** covering multiple topics Bruce has been studying.
 
 Guidelines:
 - Address Bruce naturally (\"Master Wayne\", \"Sir\", or simply \"Bruce\" — vary it).
-- Open with a brief, engaging introduction that sets the context for this topic.
-- The **core report** must be built from the MEMORY CONTEXT provided — this is what Bruce actually recorded. Cover every key idea; do not omit details.
+- Open with a brief, engaging introduction about the breadth of topics covered today.
+- The **core report** must be built from the MEMORY CONTEXT provided — this is what Bruce actually recorded. Organise it logically, using subheadings for each topic if necessary.
 - After the core report, include an **\"Additional Intelligence\"** section drawn from the KNOWLEDGE BASE CONTEXT. Frame this as supplementary insight — \"bonus intel\" that places Bruce in the top percentile of understanding.
-- Close with a concise takeaway or call-to-action that reinforces retention.
+- Close with a concise takeaway or encouraging remark about Bruce's progress.
 - Use clear structure: headings, bullet points, numbered lists, bold key terms.
 - **Tone for this report**: {tone}
 - Be thorough yet concise — every sentence must earn its place."""
 
 
-def _fetch_points_by_ids(
+def _scroll_collection_by_topics(
     qdrant_url: str,
     qdrant_key: str,
     collection: str,
-    point_ids: list[str],
+    target_topics: set[str],
 ) -> list[str]:
-    """Fetch point payloads from Qdrant by their IDs. Return list of text contents."""
-    if not point_ids:
-        return []
-
+    """Scroll Qdrant collection and return contents for any point matching target topics."""
     headers = {"api-key": qdrant_key, "Content-Type": "application/json"}
-    resp = requests.post(
-        f"{qdrant_url}/collections/{collection}/points",
-        headers=headers,
-        json={"ids": point_ids, "with_payload": True, "with_vector": False},
-        timeout=15,
-    )
-
-    if resp.status_code == 404:
-        return []
-    resp.raise_for_status()
-
     texts = []
-    for pt in resp.json().get("result", []):
-        text = pt.get("payload", {}).get("text", "")
-        if text.strip():
-            texts.append(text.strip())
+    offset = None
+
+    while True:
+        body = {"limit": 100, "with_payload": True, "with_vector": False}
+        if offset is not None:
+            body["offset"] = offset
+
+        resp = requests.post(
+            f"{qdrant_url}/collections/{collection}/points/scroll",
+            headers=headers,
+            json=body,
+            timeout=15,
+        )
+
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+
+        data = resp.json().get("result", {})
+        points = data.get("points", [])
+
+        for pt in points:
+            payload = pt.get("payload", {})
+            topic_str = payload.get("topic", "")
+            
+            # Point topics can be comma-separated
+            point_topics = {t.strip() for t in topic_str.split(",") if t.strip()}
+            
+            # If there's any overlap with target_topics, include it
+            if point_topics.intersection(target_topics):
+                text = payload.get("text", "")
+                if text.strip():
+                    texts.append(text.strip())
+
+        next_offset = data.get("next_page_offset")
+        if next_offset is None or not points:
+            break
+        offset = next_offset
+
     return texts
 
 
 def _call_gemini(prompt: str, system_prompt: str, api_key: str) -> str:
-    """Call Gemini 2.5 Pro and return the generated text."""
+    """Call Gemini 2.5 Flash and return the generated text."""
     payload = {
         "system_instruction": {
             "parts": [{"text": system_prompt}]
@@ -113,17 +134,16 @@ def main(context):
     except Exception:
         return context.res.json({"success": False, "error": "Invalid JSON body"}, 400)
 
-    topic = body.get("topic", "").strip()
-    memory_ids = body.get("memoryIds", [])
-    knowledge_base_ids = body.get("knowledgeBaseIds", [])
-
-    if not topic:
+    topics_list = body.get("topics", [])
+    if not topics_list or not isinstance(topics_list, list):
         return context.res.json(
-            {"success": False, "error": "Missing or empty 'topic' field"}, 400
+            {"success": False, "error": "'topics' must be a non-empty list of strings"}, 400
         )
-    if not memory_ids and not knowledge_base_ids:
-        return context.res.json(
-            {"success": False, "error": "At least one of 'memoryIds' or 'knowledgeBaseIds' must be provided"}, 400
+
+    target_topics = {t.strip() for t in topics_list if t.strip()}
+    if not target_topics:
+         return context.res.json(
+            {"success": False, "error": "No valid topic names provided"}, 400
         )
 
     # ── Validate env vars ───────────────────────────────────────────
@@ -136,43 +156,44 @@ def main(context):
     if not qdrant_url:
         return context.res.json({"success": False, "error": "QDRANT_URL not configured"}, 500)
 
-    # ── Fetch chunk contents from Qdrant ────────────────────────────
+    # ── Fetch all content for these topics ──────────────────────────
     try:
-        memory_texts = _fetch_points_by_ids(
-            qdrant_url, qdrant_key, MEMORY_COLLECTION, memory_ids
+        memory_texts = _scroll_collection_by_topics(
+            qdrant_url, qdrant_key, MEMORY_COLLECTION, target_topics
         )
-        kb_texts = _fetch_points_by_ids(
-            qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION, knowledge_base_ids
+        kb_texts = _scroll_collection_by_topics(
+            qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION, target_topics
         )
 
         context.log(
-            f"Fetched {len(memory_texts)} memory + {len(kb_texts)} KB chunks "
-            f"for topic '{topic}'"
+            f"Fetched {len(memory_texts)} memory + {len(kb_texts)} KB segments for {len(target_topics)} topics"
         )
-    except requests.HTTPError as exc:
-        err_body = getattr(exc.response, "text", str(exc))
-        context.error(f"Qdrant fetch error: {err_body}")
-        return context.res.json(
-            {"success": False, "error": f"Qdrant API error: {exc.response.status_code}"}, 502
+    except Exception as exc:
+        context.error(f"Qdrant fetch error: {exc}")
+        return context.res.json({"success": False, "error": f"Failed to fetch data from Qdrant: {exc}"}, 502)
+
+    if not memory_texts and not kb_texts:
+         return context.res.json(
+            {"success": False, "error": "No data found for the provided topics"}, 404
         )
 
     # ── Build the prompt ────────────────────────────────────────────
-    memory_block = "\n\n---\n\n".join(memory_texts) if memory_texts else "(No memory entries for this topic.)"
+    memory_block = "\n\n---\n\n".join(memory_texts) if memory_texts else "(No memory entries found.)"
     kb_block = "\n\n---\n\n".join(kb_texts) if kb_texts else "(No additional knowledge base entries.)"
 
     user_prompt = (
-        f"## Topic: {topic}\n\n"
+        f"## Topics to Cover: {', '.join(sorted(target_topics))}\n\n"
         f"### MEMORY CONTEXT (Bruce's own notes)\n\n{memory_block}\n\n"
         f"### KNOWLEDGE BASE CONTEXT (supplementary intelligence)\n\n{kb_block}"
     )
 
-    # Pick a random tone for daily variety
+    # Pick a random tone
     tone = random.choice(TONE_OPTIONS)
     system = SYSTEM_PROMPT.format(tone=tone)
 
-    context.log(f"Generating report with tone: {tone}")
+    context.log(f"Generating custom report with tone: {tone}")
 
-    # ── Call Gemini 2.5 Pro ─────────────────────────────────────────
+    # ── Call Gemini 2.5 Flash ───────────────────────────────────────
     try:
         report = _call_gemini(user_prompt, system, gemini_key)
 
@@ -184,20 +205,13 @@ def main(context):
         return context.res.json(
             {
                 "success": True,
-                "topic": topic,
+                "topics": sorted(list(target_topics)),
                 "report": report,
-                "memoryChunksUsed": len(memory_texts),
-                "knowledgeBaseChunksUsed": len(kb_texts),
+                "segmentsUsed": len(memory_texts) + len(kb_texts),
             },
             200,
         )
 
-    except requests.HTTPError as exc:
-        err_body = getattr(exc.response, "text", str(exc))
-        context.error(f"Gemini API Error: {err_body}")
-        return context.res.json(
-            {"success": False, "error": f"Gemini API error: {exc.response.status_code}"}, 502
-        )
     except Exception as exc:
-        context.error(f"Function Crash: {str(exc)}")
+        context.error(f"Generation error: {exc}")
         return context.res.json({"success": False, "error": str(exc)}, 500)
