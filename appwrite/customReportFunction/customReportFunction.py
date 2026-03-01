@@ -22,32 +22,39 @@ TONE_OPTIONS = [
 
 SYSTEM_PROMPT = """You are Alfred Pennyworth — Bruce Wayne's trusted butler, confidant, and intellectual equal.
 
-Your task: craft a **dense, high-quality consolidated revision report** covering multiple topics Bruce has been studying.
+Your task: craft a **dense, high-quality custom report** covering ALL of the topics listed below. Bruce has specifically requested a consolidated briefing on these subjects.
 
 Guidelines:
-- Address Bruce naturally (\"Master Wayne\", \"Sir\", or simply \"Bruce\" — vary it).
-- Open with a brief, engaging introduction about the breadth of topics covered today.
-- The **core report** must be built from the MEMORY CONTEXT provided — this is what Bruce actually recorded. Organise it logically, using subheadings for each topic if necessary.
-- After the core report, include an **\"Additional Intelligence\"** section drawn from the KNOWLEDGE BASE CONTEXT. Frame this as supplementary insight — \"bonus intel\" that places Bruce in the top percentile of understanding.
-- Close with a concise takeaway or encouraging remark about Bruce's progress.
+- Address Bruce naturally ("Master Wayne", "Sir", or simply "Bruce" — vary it).
+- Open with a brief, engaging introduction that frames why these topics are being covered together.
+- For EACH topic, create a dedicated section. The **core content** must be built from the MEMORY CONTEXT — this is what Bruce actually recorded. Cover every key idea; do not omit details.
+- After covering each topic's core content, include an **"Additional Intelligence"** subsection drawn from the KNOWLEDGE BASE CONTEXT for that topic. Frame this as supplementary insight — "bonus intel" that places Bruce in the top percentile of understanding.
+- Weave connections between topics where relevant — Bruce values seeing the bigger picture.
+- Close with a unified takeaway that ties the topics together and reinforces retention.
 - Use clear structure: headings, bullet points, numbered lists, bold key terms.
 - **Tone for this report**: {tone}
 - Be thorough yet concise — every sentence must earn its place."""
 
 
-def _scroll_collection_by_topics(
+# ── Helpers ──────────────────────────────────────────────────────────
+
+def _scroll_by_topics(
     qdrant_url: str,
     qdrant_key: str,
     collection: str,
     target_topics: set[str],
-) -> list[str]:
-    """Scroll Qdrant collection and return contents for any point matching target topics."""
+) -> dict[str, list[str]]:
+    """Scroll a Qdrant collection and return texts grouped by matching topic.
+
+    A point matches if any of its comma-separated topics intersect with
+    *target_topics* (case-insensitive).
+    """
     headers = {"api-key": qdrant_key, "Content-Type": "application/json"}
-    texts = []
+    grouped: dict[str, list[str]] = {t: [] for t in target_topics}
     offset = None
 
     while True:
-        body = {"limit": 100, "with_payload": True, "with_vector": False}
+        body: dict = {"limit": 100, "with_payload": True, "with_vector": False}
         if offset is not None:
             body["offset"] = offset
 
@@ -59,7 +66,7 @@ def _scroll_collection_by_topics(
         )
 
         if resp.status_code == 404:
-            return []
+            return grouped
         resp.raise_for_status()
 
         data = resp.json().get("result", {})
@@ -68,22 +75,23 @@ def _scroll_collection_by_topics(
         for pt in points:
             payload = pt.get("payload", {})
             topic_str = payload.get("topic", "")
-            
-            # Point topics can be comma-separated
-            point_topics = {t.strip() for t in topic_str.split(",") if t.strip()}
-            
-            # If there's any overlap with target_topics, include it
-            if point_topics.intersection(target_topics):
-                text = payload.get("text", "")
-                if text.strip():
-                    texts.append(text.strip())
+            text = payload.get("text", "").strip()
+            if not text:
+                continue
+
+            point_topics = {t.strip().lower() for t in topic_str.split(",") if t.strip()}
+            target_lower = {t.lower(): t for t in target_topics}
+
+            for pt_topic in point_topics:
+                if pt_topic in target_lower:
+                    grouped[target_lower[pt_topic]].append(text)
 
         next_offset = data.get("next_page_offset")
         if next_offset is None or not points:
             break
         offset = next_offset
 
-    return texts
+    return grouped
 
 
 def _call_gemini(prompt: str, system_prompt: str, api_key: str) -> str:
@@ -134,17 +142,15 @@ def main(context):
     except Exception:
         return context.res.json({"success": False, "error": "Invalid JSON body"}, 400)
 
-    topics_list = body.get("topics", [])
-    if not topics_list or not isinstance(topics_list, list):
+    topics = body.get("topics", [])
+
+    if not topics or not isinstance(topics, list):
         return context.res.json(
-            {"success": False, "error": "'topics' must be a non-empty list of strings"}, 400
+            {"success": False, "error": "'topics' must be a non-empty list of topic names"}, 400
         )
 
-    target_topics = {t.strip() for t in topics_list if t.strip()}
-    if not target_topics:
-         return context.res.json(
-            {"success": False, "error": "No valid topic names provided"}, 400
-        )
+    # Clean & deduplicate
+    topics = list(dict.fromkeys(t.strip() for t in topics if t.strip()))
 
     # ── Validate env vars ───────────────────────────────────────────
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
@@ -156,38 +162,41 @@ def main(context):
     if not qdrant_url:
         return context.res.json({"success": False, "error": "QDRANT_URL not configured"}, 500)
 
-    # ── Fetch all content for these topics ──────────────────────────
+    # ── Fetch all context for requested topics ──────────────────────
     try:
-        memory_texts = _scroll_collection_by_topics(
-            qdrant_url, qdrant_key, MEMORY_COLLECTION, target_topics
-        )
-        kb_texts = _scroll_collection_by_topics(
-            qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION, target_topics
-        )
+        target_set = set(topics)
+        memory_grouped = _scroll_by_topics(qdrant_url, qdrant_key, MEMORY_COLLECTION, target_set)
+        kb_grouped = _scroll_by_topics(qdrant_url, qdrant_key, KNOWLEDGE_BASE_COLLECTION, target_set)
 
-        context.log(
-            f"Fetched {len(memory_texts)} memory + {len(kb_texts)} KB segments for {len(target_topics)} topics"
-        )
-    except Exception as exc:
-        context.error(f"Qdrant fetch error: {exc}")
-        return context.res.json({"success": False, "error": f"Failed to fetch data from Qdrant: {exc}"}, 502)
+        total_mem = sum(len(v) for v in memory_grouped.values())
+        total_kb = sum(len(v) for v in kb_grouped.values())
+        context.log(f"Fetched {total_mem} memory + {total_kb} KB chunks across {len(topics)} topic(s)")
 
-    if not memory_texts and not kb_texts:
-         return context.res.json(
-            {"success": False, "error": "No data found for the provided topics"}, 404
+    except requests.HTTPError as exc:
+        err_body = getattr(exc.response, "text", str(exc))
+        context.error(f"Qdrant fetch error: {err_body}")
+        return context.res.json(
+            {"success": False, "error": f"Qdrant API error: {exc.response.status_code}"}, 502
         )
 
     # ── Build the prompt ────────────────────────────────────────────
-    memory_block = "\n\n---\n\n".join(memory_texts) if memory_texts else "(No memory entries found.)"
-    kb_block = "\n\n---\n\n".join(kb_texts) if kb_texts else "(No additional knowledge base entries.)"
+    sections = []
+    for topic in topics:
+        mem_texts = memory_grouped.get(topic, [])
+        kb_texts = kb_grouped.get(topic, [])
 
-    user_prompt = (
-        f"## Topics to Cover: {', '.join(sorted(target_topics))}\n\n"
-        f"### MEMORY CONTEXT (Bruce's own notes)\n\n{memory_block}\n\n"
-        f"### KNOWLEDGE BASE CONTEXT (supplementary intelligence)\n\n{kb_block}"
-    )
+        mem_block = "\n\n---\n\n".join(mem_texts) if mem_texts else "(No memory entries for this topic.)"
+        kb_block = "\n\n---\n\n".join(kb_texts) if kb_texts else "(No additional knowledge base entries.)"
 
-    # Pick a random tone
+        sections.append(
+            f"## Topic: {topic}\n\n"
+            f"### MEMORY CONTEXT (Bruce's own notes)\n\n{mem_block}\n\n"
+            f"### KNOWLEDGE BASE CONTEXT (supplementary intelligence)\n\n{kb_block}"
+        )
+
+    user_prompt = "\n\n" + ("\n\n" + "=" * 60 + "\n\n").join(sections)
+
+    # Pick a random tone for variety
     tone = random.choice(TONE_OPTIONS)
     system = SYSTEM_PROMPT.format(tone=tone)
 
@@ -205,13 +214,20 @@ def main(context):
         return context.res.json(
             {
                 "success": True,
-                "topics": sorted(list(target_topics)),
+                "topics": topics,
                 "report": report,
-                "segmentsUsed": len(memory_texts) + len(kb_texts),
+                "memoryChunksUsed": total_mem,
+                "knowledgeBaseChunksUsed": total_kb,
             },
             200,
         )
 
+    except requests.HTTPError as exc:
+        err_body = getattr(exc.response, "text", str(exc))
+        context.error(f"Gemini API Error: {err_body}")
+        return context.res.json(
+            {"success": False, "error": f"Gemini API error: {exc.response.status_code}"}, 502
+        )
     except Exception as exc:
-        context.error(f"Generation error: {exc}")
+        context.error(f"Function Crash: {str(exc)}")
         return context.res.json({"success": False, "error": str(exc)}, 500)
