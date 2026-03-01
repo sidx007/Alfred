@@ -1,11 +1,11 @@
 // ── Alfred Home — Single Column Layout with Wireframe Design ────────
 import { marked } from "marked";
 import {
-    fetchDailyReport,
-    fetchTopicCounts,
-    fetchTopics,
-    generateReport,
-    sendChatMessage,
+  fetchDailyReport,
+  fetchTopicCounts,
+  fetchTopics,
+  generateCustomReport,
+  sendChatMessage,
 } from "../api.js";
 
 marked.setOptions({ breaks: true, gfm: true });
@@ -81,10 +81,6 @@ function renderHomeView() {
       <div class="top-bar-brand">
         <span class="top-bar-title">Alfred</span>
       </div>
-      <div class="top-bar-actions">
-        <button class="icon-btn theme-toggle" title="Toggle theme">${themeIcon()}</button>
-        <button class="icon-btn" title="Profile">${ICONS.user}</button>
-      </div>
     </div>
 
     <!-- Main Panel: Daily Revision Report -->
@@ -117,9 +113,6 @@ function renderHomeView() {
   `;
 
   rootContainer.appendChild(page);
-
-  // Wire theme toggle
-  page.querySelector(".theme-toggle").addEventListener("click", toggleTheme);
 
   // Wire action buttons
   page.querySelectorAll(".action-btn").forEach((btn) => {
@@ -476,15 +469,17 @@ function openFullscreen(panelId) {
         </div>
         <div class="panel-body" style="gap:12px">
           <div class="report-topic-section">
-            <span class="report-topic-label">Select a topic or type a custom prompt:</span>
+            <span class="report-topic-label">Select topics for your custom report:</span>
             <div class="report-topic-chips" id="report-topic-chips">
               <div class="panel-loading"><div class="spinner"></div><span>Loading topics...</span></div>
             </div>
           </div>
-          <textarea id="report-prompt-input" class="report-prompt-textarea"
-            placeholder="Describe what you'd like a report about..." rows="3"></textarea>
-          <button class="panel-btn" id="report-generate-btn">Generate Report</button>
+          <button class="panel-btn" id="report-generate-btn" disabled>Generate Report</button>
           <div class="panel-scroll-area" id="report-output"></div>
+          <div class="saved-reports-section" id="saved-reports-section">
+            <div class="saved-reports-header">Saved Reports</div>
+            <div class="saved-reports-list" id="saved-reports-list"></div>
+          </div>
         </div>
       </div>`;
     wrapper.appendChild(nav);
@@ -498,18 +493,17 @@ function openFullscreen(panelId) {
           <span class="panel-title">Chat with Alfred</span>
         </div>
         <div class="chat-messages panel-scroll-area" id="home-chat-messages">
-          ${
-            chatMessages.length === 0
-              ? `<div class="chat-welcome">
+          ${chatMessages.length === 0
+        ? `<div class="chat-welcome">
                   <div class="chat-welcome-icon">${ICONS.sparkles}</div>
                   <p>Ask anything about your knowledge base.</p>
                   <div class="chat-suggestions" id="home-chat-suggestions">
                     ${SUGGESTIONS.map((s) => `<button class="chat-suggestion">${s}</button>`).join("")}
                   </div>
                 </div>`
-              : chatMessages
-                  .map(
-                    (m) => `
+        : chatMessages
+          .map(
+            (m) => `
                   <div class="message ${m.role}">
                     <div class="message-avatar">${m.role === "user" ? ICONS.user : ICONS.sparkles}</div>
                     <div class="message-body">
@@ -517,9 +511,9 @@ function openFullscreen(panelId) {
                       ${m.topics?.length ? `<div class="message-topics">${m.topics.map((t) => `<span class="message-topic-chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
                     </div>
                   </div>`,
-                  )
-                  .join("")
-          }
+          )
+          .join("")
+      }
         </div>
         <div class="chat-input-area">
           <textarea id="home-chat-input" class="chat-input" placeholder="Ask anything..." rows="1"></textarea>
@@ -584,22 +578,23 @@ function openFullscreen(panelId) {
 // ══════════════════════════════════════════════════════════════════════
 
 // ── Report Panel ─────────────────────────────────────────────────────
+let reportSelectedTopics = new Set();
+
 function initReportPanel(root) {
-  const promptInput = root.querySelector("#report-prompt-input");
   const generateBtn = root.querySelector("#report-generate-btn");
   const outputEl = root.querySelector("#report-output");
   const chipsContainer = root.querySelector("#report-topic-chips");
+  reportSelectedTopics = new Set();
 
   // Load topics and chunk counts as selectable chips
   Promise.all([fetchTopics(), fetchTopicCounts().catch(() => ({}))])
     .then(([topics, counts]) => {
       if (topics.length === 0) {
-        chipsContainer.innerHTML = `<span class="report-topic-empty">No topics found. Type a custom prompt below.</span>`;
+        chipsContainer.innerHTML = `<span class="report-topic-empty">No topics found in your knowledge base yet.</span>`;
         return;
       }
       chipsContainer.innerHTML = topics
         .map((t) => {
-          // counts keys are lowercase; match case-insensitively
           const count = counts[t] || counts[t.toLowerCase()] || 0;
           return `<button class="report-topic-chip" data-topic="${escapeHtml(t)}" title="${count} chunk${count !== 1 ? "s" : ""}">${ICONS.bookOpen}<span>${escapeHtml(t)}</span><span class="chip-count">${count}</span></button>`;
         })
@@ -607,17 +602,15 @@ function initReportPanel(root) {
 
       chipsContainer.querySelectorAll(".report-topic-chip").forEach((chip) => {
         chip.addEventListener("click", () => {
-          // Toggle selection
-          chip.classList.toggle("selected");
-          // Build prompt from selected topics
-          const selected = [
-            ...chipsContainer.querySelectorAll(".report-topic-chip.selected"),
-          ].map((c) => c.dataset.topic);
-          if (selected.length > 0) {
-            promptInput.value = `Generate a detailed report about: ${selected.join(", ")}`;
+          const topic = chip.dataset.topic;
+          if (reportSelectedTopics.has(topic)) {
+            reportSelectedTopics.delete(topic);
+            chip.classList.remove("selected");
           } else {
-            promptInput.value = "";
+            reportSelectedTopics.add(topic);
+            chip.classList.add("selected");
           }
+          updateReportBtn(generateBtn);
         });
       });
     })
@@ -626,32 +619,92 @@ function initReportPanel(root) {
     });
 
   generateBtn?.addEventListener("click", () =>
-    handleGenerateReport(promptInput, generateBtn, outputEl),
+    handleGenerateReport(generateBtn, outputEl),
   );
 
-  promptInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      handleGenerateReport(promptInput, generateBtn, outputEl);
-    }
+  // Load saved reports
+  renderSavedReports();
+}
+
+function renderSavedReports() {
+  const section = document.querySelector("#saved-reports-section");
+  const list = document.querySelector("#saved-reports-list");
+  if (!section || !list) return;
+
+  const saved = JSON.parse(localStorage.getItem("alfred-saved-reports") || "[]");
+
+  if (saved.length === 0) {
+    section.style.display = "none";
+    return;
+  }
+
+  section.style.display = "";
+  list.innerHTML = saved
+    .map((item, idx) => {
+      const date = new Date(item.savedAt).toLocaleDateString("en-US", {
+        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+      });
+      const topicStr = (item.topics || []).join(", ");
+      return `
+        <div class="saved-report-card" data-idx="${idx}">
+          <div class="saved-report-info">
+            <div class="saved-report-topics">${escapeHtml(topicStr || "Untitled")}</div>
+            <div class="saved-report-meta">${date} · ${item.stats?.memoryPoints || 0} notes</div>
+          </div>
+          <button class="saved-report-delete" data-idx="${idx}" title="Delete">${ICONS.x}</button>
+        </div>`;
+    })
+    .join("");
+
+  // Click to open
+  list.querySelectorAll(".saved-report-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".saved-report-delete")) return;
+      const idx = parseInt(card.dataset.idx);
+      const item = saved[idx];
+      if (item) openReportFullscreen(item.report, item.topics || [], item.stats || {}, true);
+    });
+  });
+
+  // Delete button
+  list.querySelectorAll(".saved-report-delete").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx);
+      saved.splice(idx, 1);
+      localStorage.setItem("alfred-saved-reports", JSON.stringify(saved));
+      renderSavedReports();
+    });
   });
 }
 
-async function handleGenerateReport(promptInput, generateBtn, outputEl) {
-  const prompt = promptInput.value.trim();
-  if (!prompt || generateBtn.disabled) return;
+function updateReportBtn(btn) {
+  const count = reportSelectedTopics.size;
+  btn.disabled = count === 0;
+  btn.textContent =
+    count > 0
+      ? `Generate Report (${count} topic${count !== 1 ? "s" : ""})`
+      : "Generate Report";
+}
 
+async function handleGenerateReport(generateBtn, outputEl) {
+  if (reportSelectedTopics.size === 0 || generateBtn.disabled) return;
+
+  const topics = [...reportSelectedTopics];
   generateBtn.disabled = true;
   generateBtn.textContent = "Generating...";
-  outputEl.innerHTML = `<div class="panel-loading"><div class="spinner"></div><span>Generating report...</span></div>`;
+  outputEl.innerHTML = `<div class="panel-loading"><div class="spinner"></div><span>Alfred is preparing your report — this may take a moment...</span></div>`;
 
   try {
-    const { report, stats } = await generateReport(prompt);
+    const { report, stats } = await generateCustomReport(topics);
     outputEl.innerHTML = `
       <div class="report-output-block">
         <div class="report-output-toolbar">
           <span>Based on <strong>${stats.memoryPoints}</strong> notes &amp; <strong>${stats.knowledgePoints}</strong> KB entries</span>
-          <button class="panel-action-btn" id="copy-report-btn">Copy</button>
+          <div style="display:flex;gap:6px">
+            <button class="panel-action-btn" id="fullscreen-report-btn">⛶ Read</button>
+            <button class="panel-action-btn" id="copy-report-btn">Copy</button>
+          </div>
         </div>
         <div class="report-content">${marked.parse(report)}</div>
       </div>`;
@@ -665,6 +718,10 @@ async function handleGenerateReport(promptInput, generateBtn, outputEl) {
           setTimeout(() => (btn.textContent = "Copy"), 2000);
         });
       });
+
+    outputEl
+      .querySelector("#fullscreen-report-btn")
+      ?.addEventListener("click", () => openReportFullscreen(report, topics, stats));
   } catch (err) {
     outputEl.innerHTML = `
       <div class="panel-empty">
@@ -673,9 +730,71 @@ async function handleGenerateReport(promptInput, generateBtn, outputEl) {
         <small>${escapeHtml(err.message)}</small>
       </div>`;
   } finally {
-    generateBtn.disabled = false;
-    generateBtn.textContent = "Generate Report";
+    updateReportBtn(generateBtn);
   }
+}
+
+// ── Fullscreen Report Overlay ────────────────────────────────────────
+function openReportFullscreen(report, topics, stats, isSaved = false) {
+  const overlay = document.createElement("div");
+  overlay.className = "report-fullscreen-overlay";
+  overlay.innerHTML = `
+    <div class="report-fullscreen-card">
+      <div class="report-fullscreen-toolbar">
+        <div class="report-fullscreen-title">${escapeHtml(topics.join(", "))}</div>
+        <div class="report-fullscreen-actions">
+          <span class="report-fullscreen-stats">${stats.memoryPoints} notes · ${stats.knowledgePoints} KB</span>
+          <button class="panel-action-btn" id="fs-copy-btn">Copy</button>
+          ${!isSaved ? '<button class="panel-action-btn" id="fs-save-btn">Save</button>' : ''}
+          <button class="panel-action-btn report-fullscreen-close" id="fs-close-btn">${ICONS.x}</button>
+        </div>
+      </div>
+      <div class="report-fullscreen-body">
+        <div class="report-content">${marked.parse(report)}</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Force reflow then fade in
+  requestAnimationFrame(() => overlay.classList.add("visible"));
+
+  const closeBtn = overlay.querySelector("#fs-close-btn");
+  const copyBtn = overlay.querySelector("#fs-copy-btn");
+  const saveBtn = overlay.querySelector("#fs-save-btn");
+
+  const cleanup = () => {
+    overlay.classList.remove("visible");
+    setTimeout(() => overlay.remove(), 200);
+    document.removeEventListener("keydown", escHandler);
+  };
+
+  closeBtn.addEventListener("click", cleanup);
+
+  copyBtn.addEventListener("click", () => {
+    navigator.clipboard.writeText(report).then(() => {
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => (copyBtn.textContent = "Copy"), 2000);
+    });
+  });
+
+  saveBtn.addEventListener("click", () => {
+    const saved = JSON.parse(localStorage.getItem("alfred-saved-reports") || "[]");
+    saved.unshift({
+      id: Date.now(),
+      topics,
+      report,
+      stats,
+      savedAt: new Date().toISOString(),
+    });
+    localStorage.setItem("alfred-saved-reports", JSON.stringify(saved));
+    saveBtn.textContent = "Saved!";
+    setTimeout(() => (saveBtn.textContent = "Save"), 2000);
+    renderSavedReports();
+  });
+
+  const escHandler = (e) => { if (e.key === "Escape") cleanup(); };
+  document.addEventListener("keydown", escHandler);
 }
 
 // ── Chat Panel ───────────────────────────────────────────────────────
@@ -752,16 +871,15 @@ function addChatMessage(messagesEl, role, content, topics = []) {
     <div class="message-avatar">${avatar}</div>
     <div class="message-body">
       <div class="message-content">${parsedContent}</div>
-      ${
-        topics.length
-          ? `<div class="message-topics">${topics
-              .map(
-                (t) =>
-                  `<span class="message-topic-chip">${escapeHtml(t)}</span>`,
-              )
-              .join("")}</div>`
-          : ""
-      }
+      ${topics.length
+      ? `<div class="message-topics">${topics
+        .map(
+          (t) =>
+            `<span class="message-topic-chip">${escapeHtml(t)}</span>`,
+        )
+        .join("")}</div>`
+      : ""
+    }
     </div>`;
 
   messagesEl.appendChild(msgEl);

@@ -505,6 +505,82 @@ app.get("/api/checklist", async (req, res) => {
   }
 });
 
+// POST /api/custom-report — invoke Appwrite customReportFunction
+app.post("/api/custom-report", async (req, res) => {
+  try {
+    const { topics } = req.body;
+    if (!Array.isArray(topics) || topics.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "A non-empty 'topics' array is required" });
+    }
+
+    const functionId = process.env.CUSTOMREPORTFUNCTION_ID || "";
+    const projectId = process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID || "";
+    const apiKey = process.env.EXPO_PUBLIC_APPWRITE_API_KEY || "";
+    const endpoint = process.env.APPWRITE_ENDPOINT || process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT || "https://sgp.cloud.appwrite.io/v1";
+
+    if (!functionId || !projectId || !apiKey) {
+      return res.status(500).json({
+        success: false,
+        error: "Appwrite credentials or CUSTOMREPORTFUNCTION_ID not configured",
+      });
+    }
+
+    // Synchronous execution — waits for the function to complete
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+
+    const createRes = await fetch(
+      `${endpoint}/functions/${functionId}/executions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Appwrite-Project": projectId,
+          "X-Appwrite-Key": apiKey,
+        },
+        body: JSON.stringify({
+          body: JSON.stringify({ topics }),
+          async: false,
+          method: "POST",
+        }),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeout);
+
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      throw new Error(`Appwrite execution ${createRes.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const result = await createRes.json();
+
+    if (result.status !== "completed") {
+      throw new Error(`Execution ${result.status}: ${result.errors || "unknown error"}`);
+    }
+
+    const responseBody = JSON.parse(result.responseBody || "{}");
+    if (!responseBody.success) {
+      throw new Error(responseBody.error || "Custom report function failed");
+    }
+
+    res.json({
+      success: true,
+      report: responseBody.report,
+      topics: responseBody.topics,
+      stats: {
+        memoryPoints: responseBody.memoryChunksUsed || 0,
+        knowledgePoints: responseBody.knowledgeBaseChunksUsed || 0,
+      },
+    });
+  } catch (err) {
+    console.error("POST /api/custom-report error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST /api/report — generate a custom report from a user prompt
 app.post("/api/report", async (req, res) => {
   try {
@@ -559,14 +635,13 @@ app.post("/api/report", async (req, res) => {
 User's Report Request: ${queryText}
 
 --- USER'S NOTES ---
-${
-  [...allTexts.values()]
-    .map(
-      (item, i) =>
-        `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`,
-    )
-    .join("\n\n") || "(No relevant notes found)"
-}
+${[...allTexts.values()]
+        .map(
+          (item, i) =>
+            `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`,
+        )
+        .join("\n\n") || "(No relevant notes found)"
+      }
 
 --- KNOWLEDGE BASE ENTRIES ---
 ${kbTexts.map((t, i) => `${i + 1}. ${t}`).join("\n\n") || "(No relevant knowledge base entries found)"}

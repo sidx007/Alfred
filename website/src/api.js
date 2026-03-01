@@ -53,6 +53,17 @@ export async function generateReport(prompt) {
   return { report: data.report, stats: data.stats };
 }
 
+export async function generateCustomReport(topics) {
+  const res = await fetch(`${BASE}/custom-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topics }),
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.error || "Custom report generation failed");
+  return { report: data.report, stats: data.stats };
+}
+
 export async function sendVoiceMessage(audioBlob) {
   const formData = new FormData();
   formData.append("audio", audioBlob);
