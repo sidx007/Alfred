@@ -1,8 +1,11 @@
 import cors from "cors";
 import "dotenv/config";
 import express from "express";
+import { createServer } from "http";
+import multer from "multer";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { WebSocket, WebSocketServer } from "ws";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -14,18 +17,29 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
+// Configure multer for voice upload (memory storage)
+const upload = multer({ storage: multer.memoryStorage() });
+
 const PORT = 3001;
 
 // ── Config ──────────────────────────────────────────────────────────
 const QDRANT_URL = (process.env.QDRANT_URL || "").replace(/\/+$/, "");
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
 const GEMINI_EMBED_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001";
-const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "gemma2-9b-it";
+const GEMINI_GENERATE_URL =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+
+// Multimodal (audio input → text output) via standard REST generateContent
+const GEMINI_MULTIMODAL_URL =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+
+// Live API (real-time bidirectional voice) via WebSocket
+const GEMINI_LIVE_WS_URL =
+  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const LIVE_MODEL = "models/gemini-2.0-flash-exp";
 
 const TOPICS_COLLECTION = "topics";
 const MEMORY_COLLECTION = "memory";
@@ -117,23 +131,19 @@ async function callLLM(prompt, retries = 3) {
   }
 
   for (let attempt = 0; attempt < retries; attempt++) {
-    const res = await fetch(GROQ_API_URL, {
+    const res = await fetch(`${GEMINI_GENERATE_URL}?key=${GEMINI_API_KEY}`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.4,
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.4 },
       }),
     });
 
     if (res.status === 429 && attempt < retries - 1) {
       const wait = Math.pow(2, attempt + 1) * 1000;
       console.warn(
-        `Groq 429 — retrying in ${wait / 1000}s (attempt ${attempt + 1}/${retries})`,
+        `Gemini 429 — retrying in ${wait / 1000}s (attempt ${attempt + 1}/${retries})`,
       );
       await new Promise((r) => setTimeout(r, wait));
       continue;
@@ -141,11 +151,48 @@ async function callLLM(prompt, retries = 3) {
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Groq ${res.status}: ${errText.slice(0, 300)}`);
+      throw new Error(
+        `Gemini generate ${res.status}: ${errText.slice(0, 300)}`,
+      );
     }
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || "";
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   }
+}
+
+async function multimodalAudioChat(audioBuffer, audioMimeType, textPrompt) {
+  const base64Audio = audioBuffer.toString("base64");
+
+  const res = await fetch(`${GEMINI_MULTIMODAL_URL}?key=${GEMINI_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { text: textPrompt },
+            {
+              inlineData: {
+                data: base64Audio,
+                mimeType: audioMimeType,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(
+      `Gemini Multimodal ${res.status}: ${errText.slice(0, 300)}`,
+    );
+  }
+
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return { transcript: text };
 }
 
 // ── API Routes ──────────────────────────────────────────────────────
@@ -161,6 +208,74 @@ app.get("/api/topics", async (req, res) => {
     res.json({ success: true, topics });
   } catch (err) {
     console.error("GET /api/topics error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/topic-counts — count memory chunks per topic
+app.get("/api/topic-counts", async (req, res) => {
+  try {
+    const [memoryPoints, kbPoints] = await Promise.all([
+      scrollAll(MEMORY_COLLECTION),
+      scrollAll(KNOWLEDGE_BASE_COLLECTION),
+    ]);
+    const allPoints = [...memoryPoints, ...kbPoints];
+    const counts = {};
+    for (const p of allPoints) {
+      const topicField = (p.payload?.topic || "").toLowerCase();
+      if (!topicField) continue;
+      // topic field may be comma-separated like "Machine Learning, Neural Networks"
+      const parts = topicField
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const part of parts) {
+        counts[part] = (counts[part] || 0) + 1;
+      }
+    }
+    res.json({ success: true, counts });
+  } catch (err) {
+    console.error("GET /api/topic-counts error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET health check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// Static files (Vite build)
+app.use(express.static(resolve(__dirname, "dist")));
+
+// Fallback to index.html for SPA (must be after all API routes)
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  res.sendFile(resolve(__dirname, "dist/index.html"));
+});
+
+// POST /api/voice-chat — multimodal voice chat with Gemini
+app.post("/api/voice-chat", upload.single("audio"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Audio file is required" });
+    }
+
+    const result = await multimodalAudioChat(
+      req.file.buffer,
+      req.file.mimetype || "audio/wav",
+      "Explain or answer based on the context of this audio. Be concise and conversational. Include the transcription of what I said at the start as text followed by your answer.",
+    );
+
+    res.json({
+      success: true,
+      transcript: result.transcript,
+      answer: result.transcript,
+    });
+  } catch (err) {
+    console.error("POST /api/voice-chat error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -481,14 +596,128 @@ Instructions:
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════
+//  LIVE VOICE WebSocket Proxy  (gemini-2.0-flash-live-001)
+// ══════════════════════════════════════════════════════════════════════
+const httpServer = createServer(app);
+const wss = new WebSocketServer({ server: httpServer, path: "/ws/voice" });
+
+wss.on("connection", (clientWs) => {
+  console.log("[Live Voice] Client connected");
+
+  const googleUrl = `${GEMINI_LIVE_WS_URL}?key=${GEMINI_API_KEY}`;
+  const googleWs = new WebSocket(googleUrl);
+  let setupDone = false;
+
+  googleWs.on("open", () => {
+    console.log("[Live Voice] Connected to Gemini Live API");
+
+    // Send setup message
+    const setup = {
+      setup: {
+        model: LIVE_MODEL,
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: "Puck" },
+            },
+          },
+        },
+        systemInstruction: {
+          parts: [
+            {
+              text: "You are Alfred, a concise and helpful personal knowledge assistant. Keep answers brief and conversational.",
+            },
+          ],
+        },
+      },
+    };
+    googleWs.send(JSON.stringify(setup));
+  });
+
+  googleWs.on("message", (raw) => {
+    const msg = JSON.parse(raw.toString());
+
+    // After setup acknowledgment, notify client
+    if (msg.setupComplete) {
+      setupDone = true;
+      clientWs.send(JSON.stringify({ type: "setup_complete" }));
+      return;
+    }
+
+    // Forward server content (audio / text) to client
+    if (msg.serverContent) {
+      const parts = msg.serverContent.modelTurn?.parts || [];
+      for (const part of parts) {
+        if (part.inlineData) {
+          clientWs.send(
+            JSON.stringify({
+              type: "audio",
+              data: part.inlineData.data,
+              mimeType: part.inlineData.mimeType,
+            }),
+          );
+        }
+        if (part.text) {
+          clientWs.send(JSON.stringify({ type: "text", data: part.text }));
+        }
+      }
+
+      if (msg.serverContent.turnComplete) {
+        clientWs.send(JSON.stringify({ type: "turn_complete" }));
+      }
+    }
+  });
+
+  googleWs.on("error", (err) => {
+    console.error("[Live Voice] Google WS error:", err.message);
+    clientWs.send(JSON.stringify({ type: "error", message: err.message }));
+    clientWs.close();
+  });
+
+  googleWs.on("close", (code, reason) => {
+    console.log(`[Live Voice] Google WS closed: ${code} ${reason}`);
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+  });
+
+  // Forward client audio to Google
+  clientWs.on("message", (raw) => {
+    if (!setupDone) return;
+    try {
+      const msg = JSON.parse(raw.toString());
+      // Client sends { type: "audio", data: "<base64 PCM>" }
+      if (msg.type === "audio" && msg.data) {
+        googleWs.send(
+          JSON.stringify({
+            realtimeInput: {
+              mediaChunks: [
+                {
+                  data: msg.data,
+                  mimeType: "audio/pcm;rate=16000",
+                },
+              ],
+            },
+          }),
+        );
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+  });
+
+  clientWs.on("close", () => {
+    console.log("[Live Voice] Client disconnected");
+    if (googleWs.readyState === WebSocket.OPEN) googleWs.close();
+  });
+});
+
 // ── Start ───────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`✓ Alfred API server running on http://localhost:${PORT}`);
   console.log(`  Qdrant: ${QDRANT_URL ? "configured" : "⚠ MISSING"}`);
   console.log(
-    `  Gemini (embeddings): ${GEMINI_API_KEY ? "configured" : "⚠ MISSING"}`,
+    `  Gemini (embeddings + generation): ${GEMINI_API_KEY ? "configured" : "⚠ MISSING"}`,
   );
-  console.log(
-    `  Groq (generation): ${GROQ_API_KEY ? "configured" : "⚠ MISSING"}`,
-  );
+  console.log(`  Live Voice WS: ws://localhost:${PORT}/ws/voice`);
 });

@@ -1,20 +1,38 @@
-// ── Alfred Home — 3-Panel Hyprland Layout with Fullscreen Support ───
+// ── Alfred Home — Single Column Layout with Wireframe Design ────────
 import { marked } from "marked";
-import { fetchDailyReport, generateReport, sendChatMessage } from "../api.js";
+import {
+    fetchDailyReport,
+    fetchTopicCounts,
+    fetchTopics,
+    generateReport,
+    sendChatMessage,
+} from "../api.js";
 
 marked.setOptions({ breaks: true, gfm: true });
+
+// ── SVG Icons (Lucide-style, 24x24 viewBox) ─────────────────────────
+const ICONS = {
+  bookOpen: `<svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
+  user: `<svg viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+  sun: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
+  moon: `<svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
+  mic: `<svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+  send: `<svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>`,
+  fileText: `<svg viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`,
+  messageCircle: `<svg viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>`,
+  x: `<svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
+  arrowLeft: `<svg viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>`,
+  sparkles: `<svg viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>`,
+  inbox: `<svg viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`,
+  alertTriangle: `<svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>`,
+  refreshCw: `<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`,
+};
 
 // ── State ────────────────────────────────────────────────────────────
 let chatMessages = [];
 let chatLoading = false;
-let activePanel = null; // null = tiled home, "revision" | "report" | "chat"
+let activeView = null; // null = home, "report" | "chat"
 let rootContainer = null;
-
-const PANELS = [
-  { id: "revision", icon: "📅", label: "Daily Revision" },
-  { id: "report", icon: "📊", label: "Custom Report" },
-  { id: "chat", icon: "💬", label: "Chat with Alfred" },
-];
 
 const SUGGESTIONS = [
   "What topics have I learned about?",
@@ -22,160 +40,450 @@ const SUGGESTIONS = [
   "What key concepts have I studied?",
 ];
 
+// ── Theme toggle helper ──────────────────────────────────────────────
+function getTheme() {
+  return document.documentElement.getAttribute("data-color-scheme") || "dark";
+}
+
+function toggleTheme() {
+  const next = getTheme() === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-color-scheme", next);
+  localStorage.setItem("alfred-theme", next);
+  document.querySelectorAll(".theme-toggle").forEach((btn) => {
+    btn.innerHTML = next === "dark" ? ICONS.sun : ICONS.moon;
+  });
+}
+
+function themeIcon() {
+  return getTheme() === "dark" ? ICONS.sun : ICONS.moon;
+}
+
 // ── Main render ──────────────────────────────────────────────────────
 export function renderHome(container) {
   chatMessages = [];
   chatLoading = false;
-  activePanel = null;
+  activeView = null;
   rootContainer = container;
-  renderTiledView();
+  renderHomeView();
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  TILED VIEW (3-panel Hyprland layout)
+//  HOME VIEW — Top Bar + Main Panel + Chat Input + Action Buttons
 // ══════════════════════════════════════════════════════════════════════
-function renderTiledView() {
+function renderHomeView() {
   rootContainer.innerHTML = "";
 
   const page = document.createElement("div");
   page.className = "home-page";
   page.innerHTML = `
-    <!-- ── Top Panel: Daily Revision Report ── -->
-    <div class="home-panel panel-revision tile-clickable" data-panel="revision">
-      <div class="panel-header">
-        <span class="panel-title">📅 Daily Revision Report</span>
-        <button class="panel-action-btn" id="revision-refresh-btn" title="Refresh">↻</button>
+    <!-- Top Bar -->
+    <div class="top-bar">
+      <div class="top-bar-brand">
+        <span class="top-bar-title">Alfred</span>
       </div>
-      <div class="panel-body" id="revision-body">
-        <div class="panel-loading"><div class="spinner"></div><span>Loading daily report…</span></div>
+      <div class="top-bar-actions">
+        <button class="icon-btn theme-toggle" title="Toggle theme">${themeIcon()}</button>
+        <button class="icon-btn" title="Profile">${ICONS.user}</button>
       </div>
     </div>
 
-    <!-- ── Bottom Row ── -->
-    <div class="home-bottom">
-      <!-- ── Bottom-Left: Custom Report Generator ── -->
-      <div class="home-panel panel-report tile-clickable" data-panel="report">
-        <div class="panel-header">
-          <span class="panel-title">📊 Custom Report</span>
-        </div>
-        <div class="panel-body panel-report-body">
-          <textarea
-            id="report-prompt-input"
-            class="report-prompt-textarea"
-            placeholder="Describe what you'd like a report about…"
-            rows="3"
-          ></textarea>
-          <button class="panel-btn" id="report-generate-btn">✨ Generate Report</button>
-          <div class="panel-scroll-area" id="report-output"></div>
-        </div>
+    <!-- Main Panel: Daily Revision Report -->
+    <div class="main-panel">
+      <div class="main-panel-header">
+        <span class="main-panel-title">Daily Revision Report</span>
+        <span class="main-panel-date" id="panel-date"></span>
+      </div>
+      <div class="main-panel-body" id="main-panel-body">
+        <div class="panel-loading"><div class="spinner"></div><span>Loading topics...</span></div>
+      </div>
+    </div>
+
+    <!-- Bottom Glass Region -->
+    <div class="bottom-glass-region">
+      <!-- Chat Input Bar -->
+      <div class="chat-input-bar">
+        <button class="mic-btn" title="Voice input">${ICONS.mic}</button>
+        <textarea class="chat-input" id="home-chat-input" placeholder="Ask Alfred anything..." rows="1"></textarea>
+        <button class="send-btn" id="home-chat-send" title="Send">${ICONS.send}</button>
       </div>
 
-      <!-- ── Bottom-Right: Chat ── -->
-      <div class="home-panel panel-chat tile-clickable" data-panel="chat">
-        <div class="panel-header">
-          <span class="panel-title">💬 Chat with Alfred</span>
-        </div>
-        <div class="chat-messages panel-scroll-area" id="home-chat-messages">
-          <div class="chat-welcome">
-            <div class="chat-welcome-icon">🧠</div>
-            <p>Ask anything about your knowledge base.</p>
-            <div class="chat-suggestions" id="home-chat-suggestions">
-              ${SUGGESTIONS.map((s) => `<button class="chat-suggestion">${s}</button>`).join("")}
-            </div>
-          </div>
-        </div>
-        <div class="home-chat-input-area">
-          <textarea id="home-chat-input" class="chat-input" placeholder="Ask anything…" rows="1"></textarea>
-          <button id="home-chat-send" class="chat-send-btn" title="Send">➤</button>
-        </div>
+      <!-- Action Buttons -->
+      <div class="action-buttons-row">
+        <button class="action-btn" data-action="report">${ICONS.fileText} Custom Report</button>
+        <button class="action-btn" data-action="chat">${ICONS.messageCircle} Chat</button>
+        <button class="action-btn" data-action="voice">${ICONS.mic} Voice Mode</button>
       </div>
     </div>
   `;
 
   rootContainer.appendChild(page);
 
-  // Wire up panels
-  initRevisionPanel(page);
-  initReportPanel(page);
-  initChatPanel(page);
+  // Wire theme toggle
+  page.querySelector(".theme-toggle").addEventListener("click", toggleTheme);
 
-  // Click-to-expand: clicking a panel header opens it fullscreen
-  page.querySelectorAll(".tile-clickable").forEach((panel) => {
-    panel.addEventListener("click", (e) => {
-      // Don't expand if user clicked an interactive element
-      if (e.target.closest("button, textarea, input, a, .chat-suggestion"))
-        return;
-      const panelId = panel.dataset.panel;
-      if (panelId) openFullscreen(panelId);
+  // Wire action buttons
+  page.querySelectorAll(".action-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const action = btn.dataset.action;
+      if (action === "voice") openVoiceMode();
+      else if (action === "report") openFullscreen("report");
+      else if (action === "chat") openFullscreen("chat");
     });
-    // Cursor hint
-    panel.style.cursor = "pointer";
   });
+
+  // Wire chat input — typing + send opens chat fullscreen
+  const chatInput = page.querySelector("#home-chat-input");
+  const sendBtn = page.querySelector("#home-chat-send");
+
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (text) {
+        chatMessages.push({ role: "user", content: text, topics: [] });
+        chatInput.value = "";
+        openFullscreen("chat");
+      }
+    }
+  });
+
+  sendBtn.addEventListener("click", () => {
+    const text = chatInput.value.trim();
+    if (text) {
+      chatMessages.push({ role: "user", content: text, topics: [] });
+      chatInput.value = "";
+      openFullscreen("chat");
+    }
+  });
+
+  // Mic button placeholder
+  page.querySelector(".mic-btn").addEventListener("click", () => {
+    openVoiceMode();
+  });
+
+  // Load daily report into main panel
+  loadDailyReport();
+}
+
+// ── Load daily report into main panel ────────────────────────────────
+async function loadDailyReport() {
+  const bodyEl = document.querySelector("#main-panel-body");
+  const dateEl = document.querySelector("#panel-date");
+
+  try {
+    const dailyData = await fetchDailyReport();
+    const { report, date } = dailyData;
+
+    if (date) {
+      dateEl.textContent = new Date(date).toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+    }
+
+    if (!report) {
+      bodyEl.innerHTML = `
+        <div class="panel-empty">
+          <div class="empty-icon">${ICONS.inbox}</div>
+          <p>No daily report yet.</p>
+          <small>Your daily revision report will appear here once generated.</small>
+        </div>`;
+      return;
+    }
+
+    bodyEl.innerHTML = `<div class="revision-report-content">${marked.parse(report)}</div>`;
+  } catch (err) {
+    bodyEl.innerHTML = `
+      <div class="panel-empty">
+        <div class="empty-icon">${ICONS.alertTriangle}</div>
+        <p>Failed to load daily report.</p>
+        <small>${escapeHtml(err.message)}</small>
+      </div>`;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  FULLSCREEN VIEW
+//  VOICE MODE — Real-time Live API (gemini-2.0-flash-live-001)
+// ══════════════════════════════════════════════════════════════════════
+
+// PCM audio worklet processor (inline)
+const WORKLET_CODE = `
+class PCMProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buffer = [];
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (input.length > 0) {
+      const samples = input[0]; // Float32 mono
+      // Accumulate ~100ms chunks at 16kHz = 1600 samples
+      this._buffer.push(...samples);
+      if (this._buffer.length >= 1600) {
+        // Convert float32 → int16
+        const pcm16 = new Int16Array(this._buffer.length);
+        for (let i = 0; i < this._buffer.length; i++) {
+          const s = Math.max(-1, Math.min(1, this._buffer[i]));
+          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        this.port.postMessage(pcm16.buffer, [pcm16.buffer]);
+        this._buffer = [];
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-processor', PCMProcessor);
+`;
+
+function openVoiceMode() {
+  const overlay = document.createElement("div");
+  overlay.className = "voice-mode-overlay";
+  overlay.innerHTML = `
+    <div class="voice-orb" id="voice-orb">
+      <div class="voice-orb-ring"></div>
+      <div class="voice-orb-ring"></div>
+      <div class="voice-orb-ring"></div>
+      ${ICONS.mic}
+    </div>
+    <div class="voice-mode-label" id="voice-label">Connecting...</div>
+    <div class="voice-mode-hint" id="voice-hint">Setting up live voice session with Alfred</div>
+    <div class="voice-transcript" id="voice-transcript"></div>
+    <button class="voice-mode-close" title="Close">${ICONS.x}</button>
+  `;
+  document.body.appendChild(overlay);
+
+  const orb = overlay.querySelector("#voice-orb");
+  const label = overlay.querySelector("#voice-label");
+  const hint = overlay.querySelector("#voice-hint");
+  const transcript = overlay.querySelector("#voice-transcript");
+  const closeBtn = overlay.querySelector(".voice-mode-close");
+
+  let ws = null;
+  let audioCtx = null;
+  let micStream = null;
+  let workletNode = null;
+  let isActive = false;
+
+  // ── Audio playback queue ──────────────────────────────────────────
+  const audioQueue = [];
+  let isPlaying = false;
+
+  function queueAudioChunk(base64Pcm) {
+    // Decode base64 → raw bytes
+    const raw = atob(base64Pcm);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
+    // Convert int16 PCM → float32 for Web Audio (24kHz from Gemini)
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+
+    audioQueue.push(float32);
+    if (!isPlaying) playNext();
+  }
+
+  function playNext() {
+    if (audioQueue.length === 0) {
+      isPlaying = false;
+      return;
+    }
+    isPlaying = true;
+    const samples = audioQueue.shift();
+    const buf = audioCtx.createBuffer(1, samples.length, 24000);
+    buf.getChannelData(0).set(samples);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.onended = playNext;
+    src.start();
+  }
+
+  // ── Mic capture (16kHz PCM) ───────────────────────────────────────
+  async function startMic() {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        sampleRate: 16000,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+
+    audioCtx = new AudioContext({ sampleRate: 16000 });
+
+    // Register worklet from inline code
+    const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    await audioCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    const source = audioCtx.createMediaStreamSource(micStream);
+    workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+
+    workletNode.port.onmessage = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !isActive) return;
+      // e.data is an ArrayBuffer of int16 PCM
+      const base64 = arrayBufferToBase64(e.data);
+      ws.send(JSON.stringify({ type: "audio", data: base64 }));
+    };
+
+    source.connect(workletNode);
+    workletNode.connect(audioCtx.destination); // needed to keep the graph alive (silent)
+  }
+
+  function stopMic() {
+    if (workletNode) {
+      workletNode.disconnect();
+      workletNode = null;
+    }
+    if (micStream) {
+      micStream.getTracks().forEach((t) => t.stop());
+      micStream = null;
+    }
+    if (audioCtx) {
+      audioCtx.close();
+      audioCtx = null;
+    }
+  }
+
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++)
+      binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  // ── WebSocket to server (/ws/voice → Google Live API) ─────────────
+  async function connect() {
+    try {
+      await startMic();
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${window.location.hostname}:3001/ws/voice`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        label.textContent = "Setting up...";
+        hint.textContent = "Establishing live session";
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === "setup_complete") {
+          isActive = true;
+          label.textContent = "Listening...";
+          hint.textContent = "Speak naturally — Alfred is listening";
+          orb.classList.add("live");
+          return;
+        }
+
+        if (msg.type === "audio") {
+          orb.classList.add("speaking");
+          label.textContent = "Alfred is speaking...";
+          queueAudioChunk(msg.data);
+          return;
+        }
+
+        if (msg.type === "text") {
+          transcript.textContent = msg.data;
+          return;
+        }
+
+        if (msg.type === "turn_complete") {
+          orb.classList.remove("speaking");
+          label.textContent = "Listening...";
+          return;
+        }
+
+        if (msg.type === "error") {
+          label.textContent = "Error";
+          hint.textContent = msg.message;
+        }
+      };
+
+      ws.onerror = () => {
+        label.textContent = "Connection error";
+        hint.textContent = "Failed to connect to voice service";
+      };
+
+      ws.onclose = () => {
+        isActive = false;
+        orb.classList.remove("live", "speaking");
+        label.textContent = "Disconnected";
+      };
+    } catch (err) {
+      console.error("Voice mode error:", err);
+      label.textContent = "Error";
+      hint.textContent = err.message || "Microphone access denied";
+    }
+  }
+
+  function cleanup() {
+    isActive = false;
+    stopMic();
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+    overlay.remove();
+  }
+
+  closeBtn.addEventListener("click", cleanup);
+  const escHandler = (e) => {
+    if (e.key === "Escape") {
+      cleanup();
+      document.removeEventListener("keydown", escHandler);
+    }
+  };
+  document.addEventListener("keydown", escHandler);
+
+  // Start immediately
+  connect();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  FULLSCREEN VIEW (Chat & Report)
 // ══════════════════════════════════════════════════════════════════════
 function openFullscreen(panelId) {
-  activePanel = panelId;
+  activeView = panelId;
   rootContainer.innerHTML = "";
 
   const wrapper = document.createElement("div");
   wrapper.className = "fullscreen-wrapper";
 
-  // ── Floating navigation pill on the left ──
-  const otherPanels = PANELS.filter((p) => p.id !== panelId);
+  // ── Floating navigation pill ──
   const nav = document.createElement("div");
   nav.className = "floating-nav";
   nav.innerHTML = `
-    <button class="floating-nav-home" title="Back to Home">
-      <span>⬅</span>
-    </button>
-    ${otherPanels
-      .map(
-        (
-          p,
-        ) => `<button class="floating-nav-btn" data-target="${p.id}" title="${p.label}">
-        <span class="floating-nav-icon">${p.icon}</span>
-        <span class="floating-nav-label">${p.label}</span>
-      </button>`,
-      )
-      .join("")}
+    <button class="floating-nav-home" title="Back to Home">${ICONS.arrowLeft}</button>
+    ${panelId !== "report" ? `<button class="floating-nav-btn" data-target="report">${ICONS.fileText}<span class="floating-nav-label">Report</span></button>` : ""}
+    ${panelId !== "chat" ? `<button class="floating-nav-btn" data-target="chat">${ICONS.messageCircle}<span class="floating-nav-label">Chat</span></button>` : ""}
   `;
 
-  // ── Panel content ──
   const content = document.createElement("div");
   content.className = "fullscreen-content";
 
-  if (panelId === "revision") {
+  if (panelId === "report") {
     content.innerHTML = `
       <div class="fullscreen-panel">
         <div class="panel-header">
-          <span class="panel-title">📅 Daily Revision Report</span>
-          <button class="panel-action-btn" id="revision-refresh-btn" title="Refresh">↻</button>
+          <span class="panel-title">Custom Report</span>
         </div>
-        <div class="panel-body" id="revision-body">
-          <div class="panel-loading"><div class="spinner"></div><span>Loading daily report…</span></div>
-        </div>
-      </div>`;
-    wrapper.appendChild(nav);
-    wrapper.appendChild(content);
-    rootContainer.appendChild(wrapper);
-    initRevisionPanel(content);
-  } else if (panelId === "report") {
-    content.innerHTML = `
-      <div class="fullscreen-panel">
-        <div class="panel-header">
-          <span class="panel-title">📊 Custom Report</span>
-        </div>
-        <div class="panel-body panel-report-body">
-          <textarea
-            id="report-prompt-input"
-            class="report-prompt-textarea"
-            placeholder="Describe what you'd like a report about… e.g. 'summarize everything I know about machine learning'"
-            rows="3"
-          ></textarea>
-          <button class="panel-btn" id="report-generate-btn">✨ Generate Report</button>
+        <div class="panel-body" style="gap:12px">
+          <div class="report-topic-section">
+            <span class="report-topic-label">Select a topic or type a custom prompt:</span>
+            <div class="report-topic-chips" id="report-topic-chips">
+              <div class="panel-loading"><div class="spinner"></div><span>Loading topics...</span></div>
+            </div>
+          </div>
+          <textarea id="report-prompt-input" class="report-prompt-textarea"
+            placeholder="Describe what you'd like a report about..." rows="3"></textarea>
+          <button class="panel-btn" id="report-generate-btn">Generate Report</button>
           <div class="panel-scroll-area" id="report-output"></div>
         </div>
       </div>`;
@@ -187,13 +495,13 @@ function openFullscreen(panelId) {
     content.innerHTML = `
       <div class="fullscreen-panel fullscreen-chat">
         <div class="panel-header">
-          <span class="panel-title">💬 Chat with Alfred</span>
+          <span class="panel-title">Chat with Alfred</span>
         </div>
         <div class="chat-messages panel-scroll-area" id="home-chat-messages">
           ${
             chatMessages.length === 0
               ? `<div class="chat-welcome">
-                  <div class="chat-welcome-icon">🧠</div>
+                  <div class="chat-welcome-icon">${ICONS.sparkles}</div>
                   <p>Ask anything about your knowledge base.</p>
                   <div class="chat-suggestions" id="home-chat-suggestions">
                     ${SUGGESTIONS.map((s) => `<button class="chat-suggestion">${s}</button>`).join("")}
@@ -201,33 +509,21 @@ function openFullscreen(panelId) {
                 </div>`
               : chatMessages
                   .map(
-                    (m) => `<div class="message ${m.role}">
-                    <div class="message-avatar">${m.role === "user" ? "👤" : "🧠"}</div>
+                    (m) => `
+                  <div class="message ${m.role}">
+                    <div class="message-avatar">${m.role === "user" ? ICONS.user : ICONS.sparkles}</div>
                     <div class="message-body">
-                      <div class="message-content">${
-                        m.role === "assistant"
-                          ? marked.parse(m.content)
-                          : escapeHtml(m.content)
-                      }</div>
-                      ${
-                        m.topics?.length
-                          ? `<div class="message-topics">${m.topics
-                              .map(
-                                (t) =>
-                                  `<span class="message-topic-chip">${escapeHtml(t)}</span>`,
-                              )
-                              .join("")}</div>`
-                          : ""
-                      }
+                      <div class="message-content">${m.role === "assistant" ? marked.parse(m.content) : escapeHtml(m.content)}</div>
+                      ${m.topics?.length ? `<div class="message-topics">${m.topics.map((t) => `<span class="message-topic-chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
                     </div>
                   </div>`,
                   )
                   .join("")
           }
         </div>
-        <div class="home-chat-input-area">
-          <textarea id="home-chat-input" class="chat-input" placeholder="Ask anything…" rows="1"></textarea>
-          <button id="home-chat-send" class="chat-send-btn" title="Send">➤</button>
+        <div class="chat-input-area">
+          <textarea id="home-chat-input" class="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+          <button id="home-chat-send" class="chat-send-btn" title="Send">${ICONS.send}</button>
         </div>
       </div>`;
     wrapper.appendChild(nav);
@@ -235,86 +531,103 @@ function openFullscreen(panelId) {
     rootContainer.appendChild(wrapper);
     initChatPanel(content);
 
-    // Scroll to bottom if messages exist
+    // If there's a pending user message (from home input), auto-send it
+    if (
+      chatMessages.length > 0 &&
+      chatMessages[chatMessages.length - 1].role === "user"
+    ) {
+      const messagesEl = content.querySelector("#home-chat-messages");
+      const inputEl = content.querySelector("#home-chat-input");
+      const sendBtnEl = content.querySelector("#home-chat-send");
+      const lastMsg = chatMessages[chatMessages.length - 1];
+
+      chatLoading = true;
+      sendBtnEl.disabled = true;
+      const loadingEl = showChatLoading(messagesEl);
+
+      sendChatMessage(lastMsg.content)
+        .then(({ answer, topics }) => {
+          loadingEl.remove();
+          chatMessages.push({ role: "assistant", content: answer, topics });
+          addChatMessage(messagesEl, "assistant", answer, topics);
+        })
+        .catch((err) => {
+          loadingEl.remove();
+          const errMsg = `Error: ${err.message}`;
+          chatMessages.push({ role: "assistant", content: errMsg, topics: [] });
+          addChatMessage(messagesEl, "assistant", errMsg);
+        })
+        .finally(() => {
+          chatLoading = false;
+          sendBtnEl.disabled = false;
+          inputEl.focus();
+        });
+    }
+
     const messagesEl = content.querySelector("#home-chat-messages");
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   // ── Nav event handlers ──
   nav.querySelector(".floating-nav-home").addEventListener("click", () => {
-    activePanel = null;
-    renderTiledView();
+    activeView = null;
+    renderHomeView();
   });
 
   nav.querySelectorAll(".floating-nav-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      openFullscreen(btn.dataset.target);
-    });
+    btn.addEventListener("click", () => openFullscreen(btn.dataset.target));
   });
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  PANEL INIT FUNCTIONS (shared between tiled & fullscreen)
+//  PANEL INIT FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════
-
-// ── Revision Panel ───────────────────────────────────────────────────
-function initRevisionPanel(root) {
-  const body = root.querySelector("#revision-body");
-  const refreshBtn = root.querySelector("#revision-refresh-btn");
-
-  loadDailyReport(body);
-
-  refreshBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    body.innerHTML = `<div class="panel-loading"><div class="spinner"></div><span>Loading daily report…</span></div>`;
-    loadDailyReport(body);
-  });
-}
-
-async function loadDailyReport(bodyEl) {
-  try {
-    const { report, date } = await fetchDailyReport();
-    if (!report) {
-      bodyEl.innerHTML = `
-        <div class="panel-empty">
-          <span>📭</span>
-          <p>No daily report available yet.</p>
-          <small>Reports will appear here once added to the <em>daily report</em> collection.</small>
-        </div>`;
-      return;
-    }
-    const dateStr = date
-      ? new Date(date).toLocaleDateString("en-US", {
-          weekday: "long",
-          year: "numeric",
-          month: "long",
-          day: "numeric",
-        })
-      : "";
-    bodyEl.innerHTML = `
-      ${dateStr ? `<div class="revision-date-label">${dateStr}</div>` : ""}
-      <div class="revision-report-content">${marked.parse(report)}</div>`;
-  } catch (err) {
-    bodyEl.innerHTML = `
-      <div class="panel-empty">
-        <span>⚠️</span>
-        <p>Failed to load daily report.</p>
-        <small>${escapeHtml(err.message)}</small>
-      </div>`;
-  }
-}
 
 // ── Report Panel ─────────────────────────────────────────────────────
 function initReportPanel(root) {
   const promptInput = root.querySelector("#report-prompt-input");
   const generateBtn = root.querySelector("#report-generate-btn");
   const outputEl = root.querySelector("#report-output");
+  const chipsContainer = root.querySelector("#report-topic-chips");
 
-  promptInput?.addEventListener("click", (e) => e.stopPropagation());
-  generateBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    handleGenerateReport(promptInput, generateBtn, outputEl);
-  });
+  // Load topics and chunk counts as selectable chips
+  Promise.all([fetchTopics(), fetchTopicCounts().catch(() => ({}))])
+    .then(([topics, counts]) => {
+      if (topics.length === 0) {
+        chipsContainer.innerHTML = `<span class="report-topic-empty">No topics found. Type a custom prompt below.</span>`;
+        return;
+      }
+      chipsContainer.innerHTML = topics
+        .map((t) => {
+          // counts keys are lowercase; match case-insensitively
+          const count = counts[t] || counts[t.toLowerCase()] || 0;
+          return `<button class="report-topic-chip" data-topic="${escapeHtml(t)}" title="${count} chunk${count !== 1 ? "s" : ""}">${ICONS.bookOpen}<span>${escapeHtml(t)}</span><span class="chip-count">${count}</span></button>`;
+        })
+        .join("");
+
+      chipsContainer.querySelectorAll(".report-topic-chip").forEach((chip) => {
+        chip.addEventListener("click", () => {
+          // Toggle selection
+          chip.classList.toggle("selected");
+          // Build prompt from selected topics
+          const selected = [
+            ...chipsContainer.querySelectorAll(".report-topic-chip.selected"),
+          ].map((c) => c.dataset.topic);
+          if (selected.length > 0) {
+            promptInput.value = `Generate a detailed report about: ${selected.join(", ")}`;
+          } else {
+            promptInput.value = "";
+          }
+        });
+      });
+    })
+    .catch(() => {
+      chipsContainer.innerHTML = `<span class="report-topic-empty">Failed to load topics.</span>`;
+    });
+
+  generateBtn?.addEventListener("click", () =>
+    handleGenerateReport(promptInput, generateBtn, outputEl),
+  );
 
   promptInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -329,41 +642,39 @@ async function handleGenerateReport(promptInput, generateBtn, outputEl) {
   if (!prompt || generateBtn.disabled) return;
 
   generateBtn.disabled = true;
-  generateBtn.textContent = "⏳ Generating…";
-  outputEl.innerHTML = `<div class="panel-loading"><div class="spinner"></div><span>Generating report…</span></div>`;
+  generateBtn.textContent = "Generating...";
+  outputEl.innerHTML = `<div class="panel-loading"><div class="spinner"></div><span>Generating report...</span></div>`;
 
   try {
     const { report, stats } = await generateReport(prompt);
-    const reportHtml = marked.parse(report);
     outputEl.innerHTML = `
       <div class="report-output-block">
         <div class="report-output-toolbar">
           <span>Based on <strong>${stats.memoryPoints}</strong> notes &amp; <strong>${stats.knowledgePoints}</strong> KB entries</span>
-          <button class="panel-action-btn" id="copy-report-btn">📋 Copy</button>
+          <button class="panel-action-btn" id="copy-report-btn">Copy</button>
         </div>
-        <div class="report-content">${reportHtml}</div>
+        <div class="report-content">${marked.parse(report)}</div>
       </div>`;
 
     outputEl
       .querySelector("#copy-report-btn")
-      ?.addEventListener("click", (e) => {
-        e.stopPropagation();
+      ?.addEventListener("click", () => {
         navigator.clipboard.writeText(report).then(() => {
           const btn = outputEl.querySelector("#copy-report-btn");
-          btn.textContent = "✅ Copied!";
-          setTimeout(() => (btn.textContent = "📋 Copy"), 2000);
+          btn.textContent = "Copied!";
+          setTimeout(() => (btn.textContent = "Copy"), 2000);
         });
       });
   } catch (err) {
     outputEl.innerHTML = `
       <div class="panel-empty">
-        <span>⚠️</span>
+        <div class="empty-icon">${ICONS.alertTriangle}</div>
         <p>Report generation failed.</p>
         <small>${escapeHtml(err.message)}</small>
       </div>`;
   } finally {
     generateBtn.disabled = false;
-    generateBtn.textContent = "✨ Generate Report";
+    generateBtn.textContent = "Generate Report";
   }
 }
 
@@ -373,10 +684,9 @@ function initChatPanel(root) {
   const inputEl = root.querySelector("#home-chat-input");
   const sendBtn = root.querySelector("#home-chat-send");
 
-  inputEl?.addEventListener("click", (e) => e.stopPropagation());
   inputEl?.addEventListener("input", () => {
     inputEl.style.height = "auto";
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 100) + "px";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
   });
 
   inputEl?.addEventListener("keydown", (e) => {
@@ -386,14 +696,12 @@ function initChatPanel(root) {
     }
   });
 
-  sendBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    handleChatSend(messagesEl, inputEl, sendBtn);
-  });
+  sendBtn?.addEventListener("click", () =>
+    handleChatSend(messagesEl, inputEl, sendBtn),
+  );
 
   root.querySelectorAll(".chat-suggestion").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    btn.addEventListener("click", () => {
       inputEl.value = btn.textContent;
       handleChatSend(messagesEl, inputEl, sendBtn);
     });
@@ -423,7 +731,7 @@ async function handleChatSend(messagesEl, inputEl, sendBtn) {
     addChatMessage(messagesEl, "assistant", answer, topics);
   } catch (err) {
     loadingEl.remove();
-    const errMsg = `⚠️ Error: ${err.message}`;
+    const errMsg = `Error: ${err.message}`;
     chatMessages.push({ role: "assistant", content: errMsg, topics: [] });
     addChatMessage(messagesEl, "assistant", errMsg);
   } finally {
@@ -436,7 +744,7 @@ async function handleChatSend(messagesEl, inputEl, sendBtn) {
 function addChatMessage(messagesEl, role, content, topics = []) {
   const msgEl = document.createElement("div");
   msgEl.className = `message ${role}`;
-  const avatar = role === "user" ? "👤" : "🧠";
+  const avatar = role === "user" ? ICONS.user : ICONS.sparkles;
   const parsedContent =
     role === "assistant" ? marked.parse(content) : escapeHtml(content);
 
@@ -464,7 +772,7 @@ function showChatLoading(container) {
   const el = document.createElement("div");
   el.className = "message assistant";
   el.innerHTML = `
-    <div class="message-avatar">🧠</div>
+    <div class="message-avatar">${ICONS.sparkles}</div>
     <div class="message-body">
       <div class="message-loading">
         <div class="loading-dot"></div>
@@ -477,6 +785,7 @@ function showChatLoading(container) {
   return el;
 }
 
+// ── Utility ──────────────────────────────────────────────────────────
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str;

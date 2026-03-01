@@ -1,0 +1,40 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "delete css",
+			"type": "shell",
+			"command": "del \"c:\\Users\\User\\Desktop\\projects\\alfred\\website\\src\\style.css\""
+		},
+		{
+			"label": "delete-css",
+			"type": "shell",
+			"command": "del /f \"c:\\Users\\User\\Desktop\\projects\\alfred\\website\\src\\style.css\""
+		},
+		{
+			"label": "delete-style-css",
+			"type": "shell",
+			"command": "del /f \"c:\\Users\\User\\Desktop\\projects\\alfred\\website\\src\\style.css\""
+		},
+		{
+			"label": "rm-css",
+			"type": "shell",
+			"command": "del /f \"c:\\Users\\User\\Desktop\\projects\\alfred\\website\\src\\style.css\""
+		},
+		{
+			"label": "Delete CSS file",
+			"type": "shell",
+			"command": "del /f \"c:\\Users\\User\\Desktop\\projects\\alfred\\website\\src\\style.css\""
+		},
+		{
+			"label": "Install multer",
+			"type": "shell",
+			"command": "cd website && npm install multer"
+		},
+		{
+			"label": "npm install (website)",
+			"type": "shell",
+			"command": "cd website && npm install"
+		}
+	]
+}
