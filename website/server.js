@@ -23,9 +23,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
 const GEMINI_EMBED_URL =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001";
-const GEMINI_GENERATE_URL =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "gemma2-9b-it";
 
 const TOPICS_COLLECTION = "topics";
 const MEMORY_COLLECTION = "memory";
@@ -37,142 +37,186 @@ const CHECKLIST_COLLECTION = "checklist";
 // ── Helpers ─────────────────────────────────────────────────────────
 
 async function qdrantRequest(method, path, body = null) {
-    const opts = {
-        method,
-        headers: {
-            "api-key": QDRANT_API_KEY,
-            "Content-Type": "application/json",
-        },
-    };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(`${QDRANT_URL}${path}`, opts);
-    if (!res.ok && res.status !== 404) {
-        const text = await res.text();
-        throw new Error(`Qdrant ${res.status}: ${text.slice(0, 300)}`);
-    }
-    return res;
+  const opts = {
+    method,
+    headers: {
+      "api-key": QDRANT_API_KEY,
+      "Content-Type": "application/json",
+    },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`${QDRANT_URL}${path}`, opts);
+  if (!res.ok && res.status !== 404) {
+    const text = await res.text();
+    throw new Error(`Qdrant ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res;
 }
 
 async function scrollAll(collection, filterObj = null) {
-    const points = [];
-    let offset = null;
-    while (true) {
-        const body = { limit: 100, with_payload: true };
-        if (offset !== null) body.offset = offset;
-        if (filterObj) body.filter = filterObj;
+  const points = [];
+  let offset = null;
+  while (true) {
+    const body = { limit: 100, with_payload: true };
+    if (offset !== null) body.offset = offset;
+    if (filterObj) body.filter = filterObj;
 
-        const res = await qdrantRequest(
-            "POST",
-            `/collections/${collection}/points/scroll`,
-            body
-        );
-        if (res.status === 404) return [];
-        const data = (await res.json()).result || {};
-        const pts = data.points || [];
-        points.push(...pts);
-        const next = data.next_page_offset;
-        if (next == null || !pts.length) break;
-        offset = next;
-    }
-    return points;
+    const res = await qdrantRequest(
+      "POST",
+      `/collections/${collection}/points/scroll`,
+      body,
+    );
+    if (res.status === 404) return [];
+    const data = (await res.json()).result || {};
+    const pts = data.points || [];
+    points.push(...pts);
+    const next = data.next_page_offset;
+    if (next == null || !pts.length) break;
+    offset = next;
+  }
+  return points;
 }
 
 async function embedText(text) {
-    const res = await fetch(`${GEMINI_EMBED_URL}:embedContent?key=${GEMINI_API_KEY}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            model: "models/gemini-embedding-001",
-            content: { parts: [{ text }] },
-        }),
-    });
-    if (!res.ok) throw new Error(`Gemini embed ${res.status}`);
-    const data = await res.json();
-    return data.embedding.values;
+  const res = await fetch(
+    `${GEMINI_EMBED_URL}:embedContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "models/gemini-embedding-001",
+        content: { parts: [{ text }] },
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(`Gemini embed ${res.status}`);
+  const data = await res.json();
+  return data.embedding.values;
 }
 
 async function searchQdrant(collection, vector, topK = 5) {
-    const res = await qdrantRequest(
-        "POST",
-        `/collections/${collection}/points/search`,
-        { vector, limit: topK, with_payload: true }
-    );
-    if (res.status === 404) return [];
-    const data = await res.json();
-    return data.result || [];
+  const res = await qdrantRequest(
+    "POST",
+    `/collections/${collection}/points/search`,
+    { vector, limit: topK, with_payload: true },
+  );
+  if (res.status === 404) return [];
+  const data = await res.json();
+  return data.result || [];
 }
 
-async function callGemini(prompt) {
-    const res = await fetch(`${GEMINI_GENERATE_URL}?key=${GEMINI_API_KEY}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-        }),
+async function callLLM(prompt, retries = 3) {
+  const MAX_PROMPT_CHARS = 14000;
+  if (typeof prompt !== "string") prompt = String(prompt || "");
+  if (prompt.length > MAX_PROMPT_CHARS) {
+    console.warn(
+      `Prompt length ${prompt.length} exceeds ${MAX_PROMPT_CHARS}, truncating before send`,
+    );
+    prompt =
+      prompt.slice(0, MAX_PROMPT_CHARS) + "\n\n...[TRUNCATED DUE TO LENGTH]";
+  }
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const res = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.4,
+      }),
     });
+
+    if (res.status === 429 && attempt < retries - 1) {
+      const wait = Math.pow(2, attempt + 1) * 1000;
+      console.warn(
+        `Groq 429 — retrying in ${wait / 1000}s (attempt ${attempt + 1}/${retries})`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
+
     if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
+      const errText = await res.text();
+      throw new Error(`Groq ${res.status}: ${errText.slice(0, 300)}`);
     }
     const data = await res.json();
-    const candidates = data.candidates || [];
-    if (!candidates.length) return "";
-    const parts = candidates[0].content?.parts || [];
-    return parts.map((p) => p.text || "").join("");
+    return data.choices?.[0]?.message?.content || "";
+  }
 }
 
 // ── API Routes ──────────────────────────────────────────────────────
 
 // GET /api/topics — list all topic names
 app.get("/api/topics", async (req, res) => {
-    try {
-        const points = await scrollAll(TOPICS_COLLECTION);
-        const topics = points
-            .map((p) => p.payload?.text || "")
-            .filter(Boolean)
-            .sort();
-        res.json({ success: true, topics });
-    } catch (err) {
-        console.error("GET /api/topics error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+  try {
+    const points = await scrollAll(TOPICS_COLLECTION);
+    const topics = points
+      .map((p) => p.payload?.text || "")
+      .filter(Boolean)
+      .sort();
+    res.json({ success: true, topics });
+  } catch (err) {
+    console.error("GET /api/topics error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // POST /api/chat — ask the assistant
 app.post("/api/chat", async (req, res) => {
-    try {
-        const { message } = req.body;
-        if (!message?.trim()) {
-            return res.status(400).json({ success: false, error: "Message required" });
-        }
+  try {
+    const { message } = req.body;
+    if (!message?.trim()) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Message required" });
+    }
 
-        // 1. Embed the user query
-        const queryVec = await embedText(message);
+    // 1. Embed the user query
+    const queryVec = await embedText(message);
 
-        // 2. Search memory + knowledge_base
-        const [memResults, kbResults] = await Promise.all([
-            searchQdrant(MEMORY_COLLECTION, queryVec, 5),
-            searchQdrant(KNOWLEDGE_BASE_COLLECTION, queryVec, 5),
-        ]);
+    // 2. Search memory + knowledge_base
+    const [memResults, kbResults] = await Promise.all([
+      searchQdrant(MEMORY_COLLECTION, queryVec, 5),
+      searchQdrant(KNOWLEDGE_BASE_COLLECTION, queryVec, 5),
+    ]);
 
-        // 3. Build context
-        const memoryContext = memResults
-            .map((r, i) => `[Memory ${i + 1}] (score: ${r.score.toFixed(3)})\n${r.payload?.text || ""}`)
-            .join("\n\n");
+    // 3. Build context (truncate long entries and limit count)
+    const MAX_ENTRY_CHARS = 2000;
+    const MAX_ENTRIES_PER_SECTION = 3;
 
-        const kbContext = kbResults
-            .map((r, i) => `[Knowledge ${i + 1}] (score: ${r.score.toFixed(3)})\n${r.payload?.text || ""}`)
-            .join("\n\n");
+    const memoryContext = memResults
+      .slice(0, MAX_ENTRIES_PER_SECTION)
+      .map((r, i) => {
+        let text = r.payload?.text || "";
+        if (text.length > MAX_ENTRY_CHARS)
+          text = text.slice(0, MAX_ENTRY_CHARS) + "\n...[truncated]";
+        return `[Memory ${i + 1}] (score: ${r.score.toFixed(3)})\n${text}`;
+      })
+      .join("\n\n");
 
-        const topics = [
-            ...new Set([
-                ...memResults.map((r) => r.payload?.topic).filter(Boolean),
-                ...kbResults.map((r) => r.payload?.topic).filter(Boolean),
-            ]),
-        ];
+    const kbContext = kbResults
+      .slice(0, MAX_ENTRIES_PER_SECTION)
+      .map((r, i) => {
+        let text = r.payload?.text || "";
+        if (text.length > MAX_ENTRY_CHARS)
+          text = text.slice(0, MAX_ENTRY_CHARS) + "\n...[truncated]";
+        return `[Knowledge ${i + 1}] (score: ${r.score.toFixed(3)})\n${text}`;
+      })
+      .join("\n\n");
 
-        // 4. Call Gemini with RAG context
-        const prompt = `You are Alfred, an intelligent assistant that answers questions using the user's personal knowledge base.
+    const topics = [
+      ...new Set([
+        ...memResults.map((r) => r.payload?.topic).filter(Boolean),
+        ...kbResults.map((r) => r.payload?.topic).filter(Boolean),
+      ]),
+    ];
+
+    // 4. Call Gemini with RAG context
+    const prompt = `You are Alfred, an intelligent assistant that answers questions using the user's personal knowledge base.
 
 Here is the relevant context from the user's knowledge base:
 
@@ -193,61 +237,65 @@ Instructions:
 - Use markdown formatting for readability (headers, bullets, bold).
 - Be concise but thorough.`;
 
-        const answer = await callGemini(prompt);
+    const answer = await callLLM(prompt);
 
-        res.json({ success: true, answer, topics });
-    } catch (err) {
-        console.error("POST /api/chat error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+    res.json({ success: true, answer, topics });
+  } catch (err) {
+    console.error("POST /api/chat error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // GET /api/revision — daily revision summaries
 app.get("/api/revision", async (req, res) => {
-    try {
-        const today = new Date();
-        const dayOffsets = [1, 3, 5, 7];
+  try {
+    const today = new Date();
+    const dayOffsets = [1, 3, 5, 7];
 
-        const results = {};
+    const results = {};
 
-        for (const offset of dayOffsets) {
-            const targetDate = new Date(today);
-            targetDate.setDate(today.getDate() - offset);
-            const dateStr = targetDate.toISOString().split("T")[0];
+    for (const offset of dayOffsets) {
+      const targetDate = new Date(today);
+      targetDate.setDate(today.getDate() - offset);
+      const dateStr = targetDate.toISOString().split("T")[0];
 
-            // Fetch all memory points for this date
-            const points = await scrollAll(MEMORY_COLLECTION, {
-                must: [
-                    {
-                        key: "date",
-                        match: { value: dateStr },
-                    },
-                ],
-            });
+      // Fetch all memory points for this date
+      const points = await scrollAll(MEMORY_COLLECTION, {
+        must: [
+          {
+            key: "date",
+            match: { value: dateStr },
+          },
+        ],
+      });
 
-            if (points.length === 0) {
-                results[`day${offset}`] = {
-                    date: dateStr,
-                    count: 0,
-                    summary: "No content was captured on this day.",
-                };
-                continue;
-            }
+      if (points.length === 0) {
+        results[`day${offset}`] = {
+          date: dateStr,
+          count: 0,
+          summary: "No content was captured on this day.",
+        };
+        continue;
+      }
 
-            const allTexts = points
-                .map((p) => p.payload?.text || "")
-                .filter(Boolean);
+      const REVISION_MAX_CHARS = 1200;
+      const REVISION_MAX_ITEMS = 10;
+      const allTexts = points
+        .map((p) => p.payload?.text || "")
+        .filter(Boolean)
+        .slice(0, REVISION_MAX_ITEMS)
+        .map((t) =>
+          t.length > REVISION_MAX_CHARS
+            ? t.slice(0, REVISION_MAX_CHARS) + "\n...[truncated]"
+            : t,
+        );
 
-            const topics = [
-                ...new Set(
-                    points
-                        .map((p) => p.payload?.topic || "")
-                        .filter(Boolean)
-                ),
-            ];
+      const topics = [
+        ...new Set(points.map((p) => p.payload?.topic || "").filter(Boolean)),
+      ];
 
-            // Summarize via Gemini
-            const prompt = `You are a study revision assistant. Summarize the following notes that were captured ${offset} day(s) ago for a quick revision session.
+      // Summarize via Gemini
+      const prompt = `You are a study revision assistant. Summarize the following notes that were captured ${offset} day(s) ago for a quick revision session.
 
 Topics covered: ${topics.join(", ") || "Various"}
 
@@ -261,124 +309,149 @@ Instructions:
 - Keep it concise but comprehensive enough for effective revision.
 - Start with a brief overview, then break down by topic.`;
 
-            const summary = await callGemini(prompt);
+      const summary = await callLLM(prompt);
 
-            results[`day${offset}`] = {
-                date: dateStr,
-                count: allTexts.length,
-                topics,
-                summary,
-            };
-        }
-
-        res.json({ success: true, revisions: results });
-    } catch (err) {
-        console.error("GET /api/revision error:", err);
-        res.status(500).json({ success: false, error: err.message });
+      results[`day${offset}`] = {
+        date: dateStr,
+        count: allTexts.length,
+        topics,
+        summary,
+      };
     }
+
+    res.json({ success: true, revisions: results });
+  } catch (err) {
+    console.error("GET /api/revision error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // GET /api/daily-report — fetch report from daily report collection
 app.get("/api/daily-report", async (req, res) => {
-    try {
-        const points = await scrollAll(DAILY_REPORT_COLLECTION);
-        if (points.length === 0) {
-            return res.json({ success: true, report: null });
-        }
-        // Return the most recent report (sort by date or createdAt if available)
-        const sorted = points.sort((a, b) => {
-            const da = a.payload?.date || a.payload?.createdAt || "";
-            const db = b.payload?.date || b.payload?.createdAt || "";
-            return db.localeCompare(da);
-        });
-        const latest = sorted[0].payload || {};
-        const report = latest.report || latest.content || latest.text || JSON.stringify(latest);
-        res.json({ success: true, report, date: latest.date || latest.createdAt || null });
-    } catch (err) {
-        console.error("GET /api/daily-report error:", err);
-        res.status(500).json({ success: false, error: err.message });
+  try {
+    const points = await scrollAll(DAILY_REPORT_COLLECTION);
+    if (points.length === 0) {
+      return res.json({ success: true, report: null });
     }
+    // Return the most recent report (sort by date or createdAt if available)
+    const sorted = points.sort((a, b) => {
+      const da = a.payload?.date || a.payload?.createdAt || "";
+      const db = b.payload?.date || b.payload?.createdAt || "";
+      return db.localeCompare(da);
+    });
+    const latest = sorted[0].payload || {};
+    const report =
+      latest.report || latest.content || latest.text || JSON.stringify(latest);
+    res.json({
+      success: true,
+      report,
+      date: latest.date || latest.createdAt || null,
+    });
+  } catch (err) {
+    console.error("GET /api/daily-report error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // GET /api/flashcards — fetch flashcards from flashcards collection
 app.get("/api/flashcards", async (req, res) => {
-    try {
-        const points = await scrollAll(FLASHCARDS_COLLECTION);
-        const flashcards = points
-            .map((p) => ({
-                id: String(p.id),
-                question: p.payload?.question || p.payload?.front || p.payload?.text || "",
-                answer: p.payload?.answer || p.payload?.back || "",
-            }))
-            .filter((f) => f.question);
-        res.json({ success: true, flashcards });
-    } catch (err) {
-        console.error("GET /api/flashcards error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+  try {
+    const points = await scrollAll(FLASHCARDS_COLLECTION);
+    const flashcards = points
+      .map((p) => ({
+        id: String(p.id),
+        question:
+          p.payload?.question || p.payload?.front || p.payload?.text || "",
+        answer: p.payload?.answer || p.payload?.back || "",
+      }))
+      .filter((f) => f.question);
+    res.json({ success: true, flashcards });
+  } catch (err) {
+    console.error("GET /api/flashcards error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // GET /api/checklist — fetch checklist items from checklist collection
 app.get("/api/checklist", async (req, res) => {
-    try {
-        const points = await scrollAll(CHECKLIST_COLLECTION);
-        const items = points
-            .map((p) => ({
-                id: String(p.id),
-                task: p.payload?.task || p.payload?.text || p.payload?.title || "",
-                completed: p.payload?.completed || false,
-            }))
-            .filter((i) => i.task);
-        res.json({ success: true, items });
-    } catch (err) {
-        console.error("GET /api/checklist error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+  try {
+    const points = await scrollAll(CHECKLIST_COLLECTION);
+    const items = points
+      .map((p) => ({
+        id: String(p.id),
+        task: p.payload?.task || p.payload?.text || p.payload?.title || "",
+        completed: p.payload?.completed || false,
+      }))
+      .filter((i) => i.task);
+    res.json({ success: true, items });
+  } catch (err) {
+    console.error("GET /api/checklist error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
-
 
 // POST /api/report — generate a custom report from a user prompt
 app.post("/api/report", async (req, res) => {
-    try {
-        const { prompt: userPrompt, topics } = req.body;
+  try {
+    const { prompt: userPrompt, topics } = req.body;
 
-        // Support both new prompt-based and legacy topics-based calls
-        const queryText = userPrompt?.trim() || (Array.isArray(topics) ? topics.join(", ") : "");
-        if (!queryText) {
-            return res
-                .status(400)
-                .json({ success: false, error: "A prompt or topics array is required" });
-        }
+    // Support both new prompt-based and legacy topics-based calls
+    const queryText =
+      userPrompt?.trim() || (Array.isArray(topics) ? topics.join(", ") : "");
+    if (!queryText) {
+      return res.status(400).json({
+        success: false,
+        error: "A prompt or topics array is required",
+      });
+    }
 
-        // Embed the query for semantic search
-        const queryVec = await embedText(queryText);
+    // Embed the query for semantic search
+    const queryVec = await embedText(queryText);
 
-        // Search both collections
-        const [memResults, kbResults] = await Promise.all([
-            searchQdrant(MEMORY_COLLECTION, queryVec, 15),
-            searchQdrant(KNOWLEDGE_BASE_COLLECTION, queryVec, 15),
-        ]);
+    // Search both collections
+    const [memResults, kbResults] = await Promise.all([
+      searchQdrant(MEMORY_COLLECTION, queryVec, 15),
+      searchQdrant(KNOWLEDGE_BASE_COLLECTION, queryVec, 15),
+    ]);
 
-        // Deduplicate memory results
-        const allTexts = new Map();
-        for (const r of memResults) {
-            const text = r.payload?.text || "";
-            if (text && !allTexts.has(text)) {
-                allTexts.set(text, { text, topic: r.payload?.topic, date: r.payload?.date });
-            }
-        }
-        const kbTexts = kbResults
-            .map((r) => r.payload?.text || "")
-            .filter(Boolean);
+    // Deduplicate memory results and truncate long entries
+    const MAX_REPORT_ENTRY_CHARS = 2000;
+    const allTexts = new Map();
+    for (const r of memResults) {
+      let text = r.payload?.text || "";
+      if (!text) continue;
+      if (text.length > MAX_REPORT_ENTRY_CHARS)
+        text = text.slice(0, MAX_REPORT_ENTRY_CHARS) + "\n...[truncated]";
+      if (!allTexts.has(text)) {
+        allTexts.set(text, {
+          text,
+          topic: r.payload?.topic,
+          date: r.payload?.date,
+        });
+      }
+    }
+    const kbTexts = kbResults
+      .map((r) => {
+        let t = r.payload?.text || "";
+        if (t.length > MAX_REPORT_ENTRY_CHARS)
+          t = t.slice(0, MAX_REPORT_ENTRY_CHARS) + "\n...[truncated]";
+        return t;
+      })
+      .filter(Boolean);
 
-        const geminiPrompt = `You are a report generator for a personal knowledge management system. Generate a comprehensive, well-structured report based on the user's request and their knowledge base.
+    const geminiPrompt = `You are a report generator for a personal knowledge management system. Generate a comprehensive, well-structured report based on the user's request and their knowledge base.
 
 User's Report Request: ${queryText}
 
 --- USER'S NOTES ---
-${[...allTexts.values()]
-                .map((item, i) => `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`)
-                .join("\n\n") || "(No relevant notes found)"}
+${
+  [...allTexts.values()]
+    .map(
+      (item, i) =>
+        `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`,
+    )
+    .join("\n\n") || "(No relevant notes found)"
+}
 
 --- KNOWLEDGE BASE ENTRIES ---
 ${kbTexts.map((t, i) => `${i + 1}. ${t}`).join("\n\n") || "(No relevant knowledge base entries found)"}
@@ -392,25 +465,30 @@ Instructions:
 - Include a conclusion section with key takeaways.
 - If data is limited, mention that and provide what's available.`;
 
-        const report = await callGemini(geminiPrompt);
+    const report = await callLLM(geminiPrompt);
 
-        res.json({
-            success: true,
-            report,
-            stats: {
-                memoryPoints: allTexts.size,
-                knowledgePoints: kbTexts.length,
-            },
-        });
-    } catch (err) {
-        console.error("POST /api/report error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+    res.json({
+      success: true,
+      report,
+      stats: {
+        memoryPoints: allTexts.size,
+        knowledgePoints: kbTexts.length,
+      },
+    });
+  } catch (err) {
+    console.error("POST /api/report error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ── Start ───────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-    console.log(`✓ Alfred API server running on http://localhost:${PORT}`);
-    console.log(`  Qdrant: ${QDRANT_URL ? "configured" : "⚠ MISSING"}`);
-    console.log(`  Gemini: ${GEMINI_API_KEY ? "configured" : "⚠ MISSING"}`);
+  console.log(`✓ Alfred API server running on http://localhost:${PORT}`);
+  console.log(`  Qdrant: ${QDRANT_URL ? "configured" : "⚠ MISSING"}`);
+  console.log(
+    `  Gemini (embeddings): ${GEMINI_API_KEY ? "configured" : "⚠ MISSING"}`,
+  );
+  console.log(
+    `  Groq (generation): ${GROQ_API_KEY ? "configured" : "⚠ MISSING"}`,
+  );
 });
