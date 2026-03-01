@@ -1,11 +1,10 @@
 """
 Local test harness for dailyReportPipelineFunction.
-Invokes the function via the Appwrite REST API.
+Invokes the function synchronously via the Appwrite SDK.
 """
 import json
 import os
 import sys
-import time
 
 # Load env from the project root .env
 from dotenv import load_dotenv
@@ -27,8 +26,8 @@ if not FUNCTION_ID:
     sys.exit(1)
 
 
-def _invoke(function_id: str, body: dict | None, xasync: bool = False):
-    """Invoke an Appwrite function and return parsed JSON."""
+def _invoke(function_id: str, body: dict | None):
+    """Invoke an Appwrite function synchronously and return parsed JSON."""
     client = Client()
     client.set_endpoint(ENDPOINT).set_project(PROJECT_ID).set_key(API_KEY)
     functions = Functions(client)
@@ -36,30 +35,17 @@ def _invoke(function_id: str, body: dict | None, xasync: bool = False):
     execution = functions.create_execution(
         function_id=function_id,
         body=json.dumps(body) if body else "",
-        xasync=xasync,
+        xasync=False,
         method="POST",
     )
 
-    if xasync:
-        exec_id = execution["$id"]
-        print(f"  Async execution started: {exec_id}")
-        for _ in range(60):
-            time.sleep(5)
-            execution = functions.get_execution(function_id, exec_id)
-            status = execution.get("status")
-            if status == "completed":
-                break
-            if status == "failed":
-                print(f"Execution failed. Errors: {execution.get('errors', 'N/A')}")
-                sys.exit(1)
-            print(f"  Polling... status={status}")
-        else:
-            print("Timed out waiting for async execution.")
-            sys.exit(1)
-
     status = execution.get("status")
     if status != "completed":
-        print(f"Execution {status}: {execution.get('errors', 'N/A')}")
+        print(f"Execution {status}")
+        print("--- LOGS ---")
+        print(execution.get("logs", ""))
+        print("--- ERRORS ---")
+        print(execution.get("errors", ""))
         sys.exit(1)
 
     body_str = execution.get("responseBody", "")
@@ -75,11 +61,11 @@ def _invoke(function_id: str, body: dict | None, xasync: bool = False):
 
 
 if __name__ == "__main__":
-    print("=== Invoking Daily Report Pipeline ===")
+    print("=== Invoking Daily Report Pipeline (sync) ===")
     print(f"Function ID: {FUNCTION_ID}")
     print()
 
-    result = _invoke(FUNCTION_ID, {}, xasync=True)
+    result = _invoke(FUNCTION_ID, {})
 
     if result.get("success"):
         print(f"\n✓ Pipeline complete!")
@@ -92,3 +78,4 @@ if __name__ == "__main__":
     else:
         print(f"\n✗ Failed: {result.get('error')}")
         sys.exit(1)
+
