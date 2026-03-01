@@ -26,6 +26,7 @@ const ICONS = {
   inbox: `<svg viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`,
   alertTriangle: `<svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>`,
   refreshCw: `<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`,
+  chevronRight: `<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>`,
 };
 
 // ── State ────────────────────────────────────────────────────────────
@@ -98,7 +99,6 @@ function renderHomeView() {
     <div class="bottom-glass-region">
       <!-- Chat Input Bar -->
       <div class="chat-input-bar">
-        <button class="mic-btn" title="Voice input">${ICONS.mic}</button>
         <textarea class="chat-input" id="home-chat-input" placeholder="Ask Alfred anything..." rows="1"></textarea>
         <button class="send-btn" id="home-chat-send" title="Send">${ICONS.send}</button>
       </div>
@@ -107,7 +107,6 @@ function renderHomeView() {
       <div class="action-buttons-row">
         <button class="action-btn" data-action="report">${ICONS.fileText} Custom Report</button>
         <button class="action-btn" data-action="chat">${ICONS.messageCircle} Chat</button>
-        <button class="action-btn" data-action="voice">${ICONS.mic} Voice Mode</button>
       </div>
     </div>
   `;
@@ -149,49 +148,68 @@ function renderHomeView() {
     }
   });
 
-  // Mic button placeholder
-  page.querySelector(".mic-btn").addEventListener("click", () => {
-    openVoiceMode();
-  });
-
   // Load daily report into main panel
   loadDailyReport();
 }
 
-// ── Load daily report into main panel ────────────────────────────────
+// ── Load daily reports into main panel as clickable cards ────────────
 async function loadDailyReport() {
   const bodyEl = document.querySelector("#main-panel-body");
   const dateEl = document.querySelector("#panel-date");
 
   try {
-    const dailyData = await fetchDailyReport();
-    const { report, date } = dailyData;
+    const reports = await fetchDailyReport();
 
-    if (date) {
-      dateEl.textContent = new Date(date).toLocaleDateString("en-US", {
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-      });
-    }
-
-    if (!report) {
+    if (!reports || reports.length === 0) {
       bodyEl.innerHTML = `
         <div class="panel-empty">
           <div class="empty-icon">${ICONS.inbox}</div>
-          <p>No daily report yet.</p>
-          <small>Your daily revision report will appear here once generated.</small>
+          <p>No daily reports yet.</p>
+          <small>Your daily revision reports will appear here once generated.</small>
         </div>`;
       return;
     }
 
-    bodyEl.innerHTML = `<div class="revision-report-content">${marked.parse(report)}</div>`;
+    // Show date from first report
+    const reportDate = reports[0]?.date;
+    if (reportDate) {
+      dateEl.textContent = new Date(reportDate).toLocaleDateString("en-US", {
+        weekday: "long", year: "numeric", month: "long", day: "numeric",
+      });
+    }
+
+    bodyEl.innerHTML = `<div class="daily-report-cards">${reports
+      .map(
+        (r, i) => `
+        <div class="daily-report-card" data-idx="${i}">
+          <div class="daily-report-card-icon">${ICONS.bookOpen}</div>
+          <div class="daily-report-card-info">
+            <div class="daily-report-card-topic">${escapeHtml(r.topic)}</div>
+            <div class="daily-report-card-meta">${r.memoryChunks} notes · ${r.kbChunks} KB entries</div>
+          </div>
+          <div class="daily-report-card-arrow">${ICONS.chevronRight || "›"}</div>
+        </div>`,
+      )
+      .join("")}</div>`;
+
+    // Click to open in glass overlay
+    bodyEl.querySelectorAll(".daily-report-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        const idx = parseInt(card.dataset.idx);
+        const r = reports[idx];
+        if (r) {
+          openReportFullscreen(r.report, [r.topic], {
+            memoryPoints: r.memoryChunks,
+            knowledgePoints: r.kbChunks,
+          }, true);
+        }
+      });
+    });
   } catch (err) {
     bodyEl.innerHTML = `
       <div class="panel-empty">
         <div class="empty-icon">${ICONS.alertTriangle}</div>
-        <p>Failed to load daily report.</p>
+        <p>Failed to load daily reports.</p>
         <small>${escapeHtml(err.message)}</small>
       </div>`;
   }

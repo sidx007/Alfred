@@ -416,6 +416,100 @@ body {
 }
 
 /* ── Bottom Glass Region ─────────────────────────────────────────── */
+
+/* ── Daily Report Cards ──────────────────────────────────────────── */
+.daily-report-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.daily-report-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.daily-report-card:hover {
+  border-color: var(--border-active);
+  background: rgba(239, 68, 68, 0.04);
+  transform: translateX(4px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.daily-report-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-glow);
+  border: 1px solid var(--border-active);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-light);
+  flex-shrink: 0;
+}
+
+.daily-report-card-icon svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.daily-report-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.daily-report-card-topic {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.daily-report-card-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+.daily-report-card-arrow {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  opacity: 0.4;
+  transition: all var(--transition-fast);
+}
+
+.daily-report-card:hover .daily-report-card-arrow {
+  opacity: 1;
+  color: var(--accent-light);
+  transform: translateX(2px);
+}
+
+.daily-report-card-arrow svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .bottom-glass-region {
   display: flex;
   flex-direction: column;

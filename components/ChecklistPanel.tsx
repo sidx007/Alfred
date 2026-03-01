@@ -3,36 +3,29 @@ import React, { useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { COLORS } from "../constants/theme";
-import { type ChecklistItem, fetchChecklist } from "../services/alfredApi";
-
-const FALLBACK_CHECKLIST: ChecklistItem[] = [
-  { id: "1", task: "Read a technical article", completed: false },
-  { id: "2", task: "Watch a coding tutorial", completed: true },
-  { id: "3", task: "Practice a new framework", completed: false },
-  { id: "4", task: "Contribute to open source", completed: false },
-  { id: "5", task: "Solve a LeetCode problem", completed: true },
-  { id: "6", task: "Review a PR", completed: false },
-  { id: "7", task: "Write a blog post", completed: false },
-];
+import {
+    type DailyReportTask,
+    fetchDailyReportTasks,
+} from "../services/alfredApi";
 
 export function ChecklistPanel() {
-  const [items, setItems] = useState<ChecklistItem[]>([]);
+  const [tasks, setTasks] = useState<DailyReportTask[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchChecklist()
-      .then((fetched) => {
-        setItems(fetched.length > 0 ? fetched : FALLBACK_CHECKLIST);
+    fetchDailyReportTasks()
+      .then((fetched) => setTasks(fetched))
+      .catch((err) => {
+        console.error("[ChecklistPanel] fetch error:", err);
+        setError(err.message || "Failed to load tasks");
       })
-      .catch(() => setItems(FALLBACK_CHECKLIST))
       .finally(() => setLoading(false));
   }, []);
 
   const toggleItem = (id: string) => {
-    setItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, completed: !item.completed } : item,
-      ),
+    setTasks((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)),
     );
   };
 
@@ -43,40 +36,72 @@ export function ChecklistPanel() {
       </View>
 
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Daily Checklist</Text>
+        <Text style={styles.headerTitle}>Daily Tasks</Text>
       </View>
 
       {loading ? (
         <View style={styles.loadingArea}>
           <ActivityIndicator color={COLORS.accent} size="large" />
         </View>
+      ) : error ? (
+        <View style={styles.loadingArea}>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      ) : tasks.length === 0 ? (
+        <View style={styles.loadingArea}>
+          <Text style={styles.emptyText}>No daily reports yet.</Text>
+        </View>
       ) : (
         <View style={styles.listContent}>
-          {items.map((item) => (
+          {tasks.map((task) => (
             <TouchableOpacity
-              key={item.id}
+              key={task.id}
               activeOpacity={0.7}
-              style={[styles.itemRow, item.completed && styles.itemRowCompleted]}
-              onPress={() => toggleItem(item.id)}
+              style={[
+                styles.itemRow,
+                task.completed && styles.itemRowCompleted,
+              ]}
+              onPress={() => toggleItem(task.id)}
             >
               <View
                 style={[
                   styles.checkbox,
-                  item.completed && styles.checkboxChecked,
+                  task.completed && styles.checkboxChecked,
                 ]}
               >
-                {item.completed && (
+                {task.completed && (
                   <Ionicons name="checkmark" size={16} color={COLORS.bgBase} />
                 )}
               </View>
-              <Text
-                style={[
-                  styles.itemText,
-                  item.completed && styles.itemTextCompleted,
-                ]}
-              >
-                {item.task}
-              </Text>
+              <View style={styles.itemContent}>
+                <Text
+                  style={[
+                    styles.itemText,
+                    task.completed && styles.itemTextCompleted,
+                  ]}
+                >
+                  {task.topic}
+                </Text>
+                {task.report ? (
+                  <Text style={styles.reportPreview} numberOfLines={2}>
+                    {task.report}
+                  </Text>
+                ) : null}
+                <View style={styles.metaRow}>
+                  {task.date ? (
+                    <Text style={styles.metaText}>{task.date}</Text>
+                  ) : null}
+                  {(task.memoryChunks > 0 || task.kbChunks > 0) && (
+                    <Text style={styles.metaText}>
+                      {task.memoryChunks > 0
+                        ? `${task.memoryChunks} memory`
+                        : ""}
+                      {task.memoryChunks > 0 && task.kbChunks > 0 ? " · " : ""}
+                      {task.kbChunks > 0 ? `${task.kbChunks} KB` : ""}
+                    </Text>
+                  )}
+                </View>
+              </View>
             </TouchableOpacity>
           ))}
         </View>
@@ -121,7 +146,7 @@ const styles = StyleSheet.create({
   },
   itemRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     backgroundColor: "rgba(255, 255, 255, 0.03)",
     padding: 20,
     borderRadius: 16,
@@ -140,6 +165,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: COLORS.accent,
     marginRight: 16,
+    marginTop: 2,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -147,14 +173,46 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accent,
     borderColor: COLORS.accent,
   },
+  itemContent: {
+    flex: 1,
+  },
   itemText: {
     fontSize: 16,
     fontFamily: "PlusJakartaSans-Medium",
     color: COLORS.textPrimary,
-    flex: 1,
   },
   itemTextCompleted: {
     textDecorationLine: "line-through",
     color: COLORS.textSecondary,
+  },
+  reportPreview: {
+    fontSize: 13,
+    fontFamily: "PlusJakartaSans-Regular",
+    color: COLORS.textSecondary,
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  metaRow: {
+    flexDirection: "row",
+    marginTop: 8,
+    gap: 12,
+  },
+  metaText: {
+    fontSize: 12,
+    fontFamily: "PlusJakartaSans-Regular",
+    color: COLORS.accent,
+    opacity: 0.8,
+  },
+  emptyText: {
+    fontSize: 16,
+    fontFamily: "PlusJakartaSans-Regular",
+    color: COLORS.textSecondary,
+  },
+  errorText: {
+    fontSize: 14,
+    fontFamily: "PlusJakartaSans-Regular",
+    color: COLORS.accent,
+    textAlign: "center",
+    paddingHorizontal: 32,
   },
 });

@@ -39,7 +39,7 @@ export async function fetchDailyReport() {
   const res = await fetch(`${BASE}/daily-report`);
   const data = await res.json();
   if (!data.success) throw new Error(data.error || "Daily report fetch failed");
-  return { report: data.report, date: data.date };
+  return data.reports || [];
 }
 
 export async function generateReport(prompt) {
