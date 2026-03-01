@@ -149,26 +149,40 @@ def _fetch_texts_by_ids(
 
 
 def _call_gemini(prompt: str, system_prompt: str, api_key: str) -> str:
-    """Call Gemini and return generated text."""
-    resp = requests.post(
-        GEMINI_GENERATE_URL,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        json={
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 1.2, "topP": 0.95, "topK": 40,
-                "maxOutputTokens": 65536,
+    """Call Gemini and return generated text. Retries on 429 (rate limit)."""
+    import time as _time
+
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        resp = requests.post(
+            GEMINI_GENERATE_URL,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            json={
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 1.2, "topP": 0.95, "topK": 40,
+                    "maxOutputTokens": 65536,
+                },
             },
-        },
-        timeout=120,
-    )
+            timeout=120,
+        )
+
+        if resp.status_code == 429 and attempt < max_retries:
+            # Rate limited — wait 60s then retry
+            _time.sleep(60)
+            continue
+
+        resp.raise_for_status()
+        candidates = resp.json().get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join(p.get("text", "") for p in parts)
+
+    # Should not reach here, but just in case
     resp.raise_for_status()
-    candidates = resp.json().get("candidates", [])
-    if not candidates:
-        return ""
-    parts = candidates[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    return ""
 
 
 def _ensure_collection(qdrant_url: str, qdrant_key: str, collection: str):

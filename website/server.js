@@ -441,27 +441,25 @@ Instructions:
   }
 });
 
-// GET /api/daily-report — fetch report from daily report collection
+// GET /api/daily-report — fetch all reports from daily report collection
 app.get("/api/daily-report", async (req, res) => {
   try {
     const points = await scrollAll(DAILY_REPORT_COLLECTION);
     if (points.length === 0) {
-      return res.json({ success: true, report: null });
+      return res.json({ success: true, reports: [] });
     }
-    // Return the most recent report (sort by date or createdAt if available)
-    const sorted = points.sort((a, b) => {
-      const da = a.payload?.date || a.payload?.createdAt || "";
-      const db = b.payload?.date || b.payload?.createdAt || "";
-      return db.localeCompare(da);
+    // Return all reports sorted by topic
+    const reports = points.map((pt) => {
+      const p = pt.payload || {};
+      return {
+        topic: p.topic || "Untitled",
+        report: p.report || p.content || p.text || "",
+        date: p.date || p.createdAt || null,
+        memoryChunks: p.memoryChunks || 0,
+        kbChunks: p.kbChunks || 0,
+      };
     });
-    const latest = sorted[0].payload || {};
-    const report =
-      latest.report || latest.content || latest.text || JSON.stringify(latest);
-    res.json({
-      success: true,
-      report,
-      date: latest.date || latest.createdAt || null,
-    });
+    res.json({ success: true, reports });
   } catch (err) {
     console.error("GET /api/daily-report error:", err);
     res.status(500).json({ success: false, error: err.message });
