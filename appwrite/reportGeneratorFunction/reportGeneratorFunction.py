@@ -3,7 +3,7 @@ import os
 import random
 import requests
 
-GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 MEMORY_COLLECTION = "memory"
 KNOWLEDGE_BASE_COLLECTION = "knowledge_base"
