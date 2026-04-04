@@ -1,97 +1,105 @@
-// ── Frontend API client — calls the Express proxy ───────────────────
-
 const BASE = "/api";
 
+async function request(path, { method = "GET", body } = {}) {
+  const response = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const raw = await response.text();
+  let data = {};
+
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`API ${path} returned non-JSON response`);
+  }
+
+  if (!response.ok || data.success === false) {
+    throw new Error(data.error || `API request failed (${response.status})`);
+  }
+
+  return data;
+}
+
 export async function fetchTopics() {
-  const res = await fetch(`${BASE}/topics`);
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Failed to fetch topics");
-  return data.topics;
+  const data = await request("/topics");
+  return data.topics || [];
 }
 
 export async function fetchTopicCounts() {
-  const res = await fetch(`${BASE}/topic-counts`);
-  const data = await res.json();
-  if (!data.success)
-    throw new Error(data.error || "Failed to fetch topic counts");
-  return data.counts; // { "TopicName": 5, ... }
+  const data = await request("/topic-counts");
+  return data.counts || {};
 }
 
 export async function sendChatMessage(message) {
-  const res = await fetch(`${BASE}/chat`, {
+  const data = await request("/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: { message },
   });
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Chat failed");
-  return { answer: data.answer, topics: data.topics || [] };
+  return {
+    answer: data.answer || "",
+    topics: data.topics || [],
+  };
 }
 
-export async function fetchRevisions() {
-  const res = await fetch(`${BASE}/revision`);
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Revision fetch failed");
-  return data.revisions;
-}
-
-export async function fetchDailyReport() {
-  const res = await fetch(`${BASE}/daily-report`);
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Daily report fetch failed");
+export async function fetchDailyReportTasks() {
+  const data = await request("/daily-report");
   return data.reports || [];
 }
 
-export async function generateReport(prompt) {
-  const res = await fetch(`${BASE}/report`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Report generation failed");
-  return { report: data.report, stats: data.stats };
+export async function fetchChecklistItems() {
+  const data = await request("/checklist");
+  return data.items || [];
+}
+
+export async function fetchFlashcards() {
+  const data = await request("/flashcards");
+  return data.flashcards || [];
 }
 
 export async function generateCustomReport(topics) {
-  const res = await fetch(`${BASE}/custom-report`, {
+  const data = await request("/custom-report", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topics }),
+    body: { topics },
   });
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || "Custom report generation failed");
-  return { report: data.report, stats: data.stats };
+  return {
+    report: data.report || "",
+    topics: data.topics || topics,
+    stats: data.stats || { memoryPoints: 0, knowledgePoints: 0 },
+  };
 }
 
-export async function sendVoiceMessage(audioBlob) {
-  const formData = new FormData();
-  formData.append("audio", audioBlob);
+export async function generateReport(prompt, topics = []) {
+  const data = await request("/report", {
+    method: "POST",
+    body: { prompt, topics },
+  });
+  return {
+    report: data.report || "",
+    stats: data.stats || { memoryPoints: 0, knowledgePoints: 0 },
+  };
+}
 
-  try {
-    const res = await fetch(`${BASE}/voice-chat`, {
-      method: "POST",
-      body: formData,
-    });
+export async function runUploadPipeline(payload) {
+  const data = await request("/upload", {
+    method: "POST",
+    body: payload,
+  });
 
-    const contentType = res.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      const text = await res.text();
-      console.error("Non-JSON response from server:", text.slice(0, 500));
-      throw new Error(
-        `Server returned an invalid response (${res.status}). Please check if the backend is running.`,
-      );
-    }
-
-    const data = await res.json();
-    if (!data.success) throw new Error(data.error || "Voice chat failed");
-    return {
-      transcript: data.transcript,
-      answer: data.answer,
-      audioBase64: data.audio,
-    };
-  } catch (err) {
-    console.error("sendVoiceMessage error:", err);
-    throw err;
-  }
+  return {
+    extractedText: data.extractedText || "",
+    topics: data.topics || [],
+    summary: data.summary || {
+      memoryStored: 0,
+      knowledgeBaseStored: 0,
+      skipped: 0,
+      processed: 0,
+      segments: 0,
+    },
+    results: data.results || [],
+  };
 }

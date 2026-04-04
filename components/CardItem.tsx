@@ -53,8 +53,8 @@ export function CardItem({
     );
 
     // Page transition: cards scale down and fade when leaving home
-    // pageOffset rests at -SCREEN_HEIGHT when home is visible
-    const distFromHome = Math.abs(pageOffset.value + SCREEN_HEIGHT);
+    // pageOffset rests at -SCREEN_HEIGHT*2 when home is visible (4-page layout)
+    const distFromHome = Math.abs(pageOffset.value + SCREEN_HEIGHT * 2);
     const swipeProgress = interpolate(
       distFromHome,
       [0, SCREEN_HEIGHT * 0.4],

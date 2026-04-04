@@ -12,8 +12,11 @@ import Animated, {
 
 import { AudioPickerSheet } from "../components/AudioPickerSheet";
 import { CardItem } from "../components/CardItem";
+import { ChatPanel } from "../components/ChatPanel";
 import { ChecklistPanel } from "../components/ChecklistPanel";
-import { FlashcardsPanel } from "../components/FlashcardsPanel";
+import { CustomReportPanel } from "../components/CustomReportPanel";
+// FlashcardsPanel kept for future use — replaced by ChatPanel
+// import { FlashcardsPanel } from "../components/FlashcardsPanel";
 import { ImagePickerSheet } from "../components/ImagePickerSheet";
 import { SwipeDownArrow } from "../components/SwipeDownArrow";
 import { SwipeUpArrow } from "../components/SwipeUpArrow";
@@ -32,13 +35,14 @@ import { COLORS } from "../constants/theme";
 import { useUpload } from "../context/UploadContext";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
-const SWIPE_THRESHOLD = 60;
+const SWIPE_THRESHOLD = 30;
 const PAGE_SPRING = { damping: 22, stiffness: 180, mass: 1 };
 
-// Page positions: 0 = flashcards, -SH = home (default), -2*SH = checklist
-const PAGE_PROFILE = 0;
-const PAGE_HOME = -SCREEN_HEIGHT;
-const PAGE_CHECKLIST = -SCREEN_HEIGHT * 2;
+// Page positions: 0 = chat, -SH = custom reports, -2*SH = home (default), -3*SH = checklist
+const PAGE_CHAT = 0;
+const PAGE_CUSTOM_REPORTS = -SCREEN_HEIGHT;
+const PAGE_HOME = -SCREEN_HEIGHT * 2;
+const PAGE_CHECKLIST = -SCREEN_HEIGHT * 3;
 
 const lightHaptic = () =>
   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -98,23 +102,9 @@ export default function Index() {
     setDetailModalVisible(true);
   }, []);
 
-  // ── Profile gesture: swipe up → home ──
-  const profilePan = Gesture.Pan()
-    .activeOffsetY([-9999, -15])
-    .activeOffsetX([-15, 15])
-    .onUpdate((e) => {
-      if (e.translationY < 0) {
-        pageOffset.value = PAGE_PROFILE + e.translationY;
-      }
-    })
-    .onEnd((e) => {
-      if (e.translationY < -SWIPE_THRESHOLD && Math.abs(e.translationX) < 60) {
-        pageOffset.value = withSpring(PAGE_HOME, PAGE_SPRING);
-        runOnJS(mediumHaptic)();
-      } else {
-        pageOffset.value = withSpring(PAGE_PROFILE, PAGE_SPRING);
-      }
-    });
+  // Chat & Custom Reports gestures moved into their respective panels.
+  // pageOffset is passed as a prop so they can drive page transitions
+  // from their header drag-handle areas without blocking scroll.
 
   // ── Home gesture: horizontal cards + vertical page swipe ──
   const homeTap = Gesture.Tap().onEnd(() => {
@@ -124,7 +114,7 @@ export default function Index() {
   const homePan = Gesture.Pan()
     .onUpdate((e) => {
       dragX.value = e.translationX;
-      // Vertical: up toward checklist, down toward profile
+      // Vertical: up toward checklist, down toward custom reports
       if (e.translationY < 0) {
         pageOffset.value = PAGE_HOME + e.translationY;
       } else if (e.translationY > 0) {
@@ -144,9 +134,9 @@ export default function Index() {
         return;
       }
 
-      // Swipe down → profile
+      // Swipe down → custom reports
       if (e.translationY > SWIPE_THRESHOLD) {
-        pageOffset.value = withSpring(PAGE_PROFILE, PAGE_SPRING);
+        pageOffset.value = withSpring(PAGE_CUSTOM_REPORTS, PAGE_SPRING);
         dragX.value = 0;
         currentIndex.value = withSpring(
           Math.round(currentIndex.value),
@@ -174,24 +164,6 @@ export default function Index() {
       currentIndex.value = adjustedIndex;
       currentIndex.value = withSpring(target, SPRING_CONFIG);
       if (direction !== 0) runOnJS(lightHaptic)();
-    });
-
-  // ── Checklist gesture: swipe down → home ──
-  const checklistPan = Gesture.Pan()
-    .activeOffsetY([15, 9999])
-    .activeOffsetX([-15, 15])
-    .onUpdate((e) => {
-      if (e.translationY > 0) {
-        pageOffset.value = PAGE_CHECKLIST + e.translationY;
-      }
-    })
-    .onEnd((e) => {
-      if (e.translationY > SWIPE_THRESHOLD && Math.abs(e.translationX) < 60) {
-        pageOffset.value = withSpring(PAGE_HOME, PAGE_SPRING);
-        runOnJS(mediumHaptic)();
-      } else {
-        pageOffset.value = withSpring(PAGE_CHECKLIST, PAGE_SPRING);
-      }
     });
 
   // ── Animated styles ──
@@ -222,12 +194,15 @@ export default function Index() {
       />
 
       <Animated.View style={[styles.pagesContainer, containerStyle]}>
-        {/* ── Profile (top) ── */}
-        <GestureDetector gesture={profilePan}>
-          <Animated.View style={styles.page}>
-            <FlashcardsPanel />
-          </Animated.View>
-        </GestureDetector>
+        {/* ── Chat (top) ── */}
+        <Animated.View style={styles.page}>
+          <ChatPanel pageOffset={pageOffset} />
+        </Animated.View>
+
+        {/* ── Custom Reports ── */}
+        <Animated.View style={styles.page}>
+          <CustomReportPanel pageOffset={pageOffset} />
+        </Animated.View>
 
         {/* ── Home (middle) ── */}
         <GestureDetector gesture={Gesture.Race(homePan, homeTap)}>
@@ -268,11 +243,9 @@ export default function Index() {
         </GestureDetector>
 
         {/* ── Checklist (bottom) ── */}
-        <GestureDetector gesture={checklistPan}>
-          <Animated.View style={styles.page}>
-            <ChecklistPanel />
-          </Animated.View>
-        </GestureDetector>
+        <Animated.View style={styles.page}>
+          <ChecklistPanel pageOffset={pageOffset} />
+        </Animated.View>
       </Animated.View>
 
       {/* ── Modals ── */}
@@ -306,11 +279,12 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   pagesContainer: {
-    height: SCREEN_HEIGHT * 3,
+    height: SCREEN_HEIGHT * 4,
   },
   page: {
     height: SCREEN_HEIGHT,
     backgroundColor: COLORS.bgBase,
+    overflow: "hidden",
   },
   touchArea: {
     flex: 1,

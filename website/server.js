@@ -6,6 +6,7 @@ import multer from "multer";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { WebSocket, WebSocketServer } from "ws";
+import { runUploadPipeline } from "./api/_lib/backend.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -15,7 +16,15 @@ config({ path: resolve(__dirname, "../.env") });
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
+
+// Keep API errors JSON-shaped even when request bodies are malformed.
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ success: false, error: "Invalid JSON request body" });
+  }
+  next(err);
+});
 
 // Configure multer for voice upload (memory storage)
 const upload = multer({ storage: multer.memoryStorage() });
@@ -243,6 +252,28 @@ app.get("/api/topic-counts", async (req, res) => {
 // GET health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// POST /api/upload — run text/audio/image ingestion pipeline
+app.post("/api/upload", async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const type = String(payload.type || "")
+      .trim()
+      .toLowerCase();
+
+    if (!["text", "audio", "image"].includes(type)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "type must be one of: text, audio, image" });
+    }
+
+    const result = await runUploadPipeline(payload);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("POST /api/upload error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Static files (Vite build)

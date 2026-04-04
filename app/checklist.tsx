@@ -4,13 +4,13 @@ import React, { useEffect, useState } from "react";
 import {
     ActivityIndicator,
     Dimensions,
-    FlatList,
     Pressable,
     StatusBar,
     StyleSheet,
     Text,
     View,
 } from "react-native";
+import { FlatList } from "react-native-gesture-handler";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
     Easing,
@@ -51,7 +51,7 @@ export default function Checklist() {
   }, []);
 
   const swipeDownGesture = Gesture.Pan()
-    .activeOffsetY([15, 9999])
+    .activeOffsetY(15)
     .onUpdate((event) => {
       screenY.value = Math.max(event.translationY, 0);
     })
@@ -159,6 +159,7 @@ export default function Checklist() {
             keyExtractor={(t) => t.id}
             contentContainerStyle={styles.listContent}
             showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
           />
         )}
       </Animated.View>
