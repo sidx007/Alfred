@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const COLLECTIONS = {
   topics: "topics",
   memory: "memory",
@@ -10,9 +12,12 @@ const GEMINI_EMBED_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent";
 const GEMINI_GENERATE_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+const GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const APPWRITE_SYNC_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_APPWRITE_ENDPOINT = "https://sgp.cloud.appwrite.io/v1";
+const DAILY_FLASHCARD_SOURCE = "daily-reports-groq";
+const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 
 function env(...names) {
   for (const name of names) {
@@ -37,9 +42,18 @@ function getGeminiApiKey() {
   return env("GEMINI_API_KEY", "EXPO_PUBLIC_GEMINI_API_KEY");
 }
 
+function getGroqConfig() {
+  return {
+    apiKey: env("GROQ_API_KEY", "EXPO_PUBLIC_GROQ_API_KEY"),
+    model: env("GROQ_MODEL", "EXPO_PUBLIC_GROQ_MODEL") || DEFAULT_GROQ_MODEL,
+  };
+}
+
 function getAppwriteConfig() {
   return {
-    endpoint: env("APPWRITE_ENDPOINT", "EXPO_PUBLIC_APPWRITE_ENDPOINT") || DEFAULT_APPWRITE_ENDPOINT,
+    endpoint:
+      env("APPWRITE_ENDPOINT", "EXPO_PUBLIC_APPWRITE_ENDPOINT") ||
+      DEFAULT_APPWRITE_ENDPOINT,
     projectId: env("APPWRITE_PROJECT_ID", "EXPO_PUBLIC_APPWRITE_PROJECT_ID"),
     apiKey: env("APPWRITE_API_KEY", "EXPO_PUBLIC_APPWRITE_API_KEY"),
   };
@@ -54,9 +68,15 @@ function getFunctionId(type) {
     case "clustering":
       return env("CLUSTERINGFUNCTION_ID", "EXPO_PUBLIC_CLUSTERINGFUNCTION_ID");
     case "processSegment":
-      return env("PROCESSSEGMENTFUNCTION_ID", "EXPO_PUBLIC_PROCESSSEGMENTFUNCTION_ID");
+      return env(
+        "PROCESSSEGMENTFUNCTION_ID",
+        "EXPO_PUBLIC_PROCESSSEGMENTFUNCTION_ID",
+      );
     case "customReport":
-      return env("CUSTOMREPORTFUNCTION_ID", "EXPO_PUBLIC_CUSTOMREPORTFUNCTION_ID");
+      return env(
+        "CUSTOMREPORTFUNCTION_ID",
+        "EXPO_PUBLIC_CUSTOMREPORTFUNCTION_ID",
+      );
     default:
       return "";
   }
@@ -82,6 +102,99 @@ async function qdrantRequest(method, path, body = null) {
   }
 
   return response;
+}
+
+function inferVectorSize(points) {
+  const candidate = Array.isArray(points)
+    ? points.find(
+        (point) => Array.isArray(point?.vector) && point.vector.length > 0,
+      )
+    : null;
+
+  const size = Number(candidate?.vector?.length || 0);
+  return Number.isInteger(size) && size > 0 ? size : 3072;
+}
+
+async function ensureQdrantCollection(collection, vectorSize) {
+  const size =
+    Number.isInteger(vectorSize) && vectorSize > 0 ? vectorSize : 3072;
+
+  const response = await qdrantRequest(
+    "PUT",
+    `/collections/${encodeURIComponent(collection)}?wait=true`,
+    {
+      vectors: {
+        size,
+        distance: "Cosine",
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `Failed to create Qdrant collection '${collection}': ${text.slice(0, 300)}`,
+    );
+  }
+
+  await response.json();
+}
+
+async function upsertPoints(collection, points) {
+  if (!Array.isArray(points) || points.length === 0) return;
+
+  let response = await qdrantRequest(
+    "PUT",
+    `/collections/${encodeURIComponent(collection)}/points?wait=true`,
+    { points },
+  );
+
+  if (response.status === 404) {
+    await ensureQdrantCollection(collection, inferVectorSize(points));
+    response = await qdrantRequest(
+      "PUT",
+      `/collections/${encodeURIComponent(collection)}/points?wait=true`,
+      { points },
+    );
+  }
+
+  if (response.status === 404) {
+    throw new Error(`Qdrant collection '${collection}' does not exist`);
+  }
+
+  const json = await response.json();
+  if (json.status !== "ok") {
+    throw new Error("Qdrant upsert failed");
+  }
+}
+
+async function deletePointsByFilter(collection, filter) {
+  if (!filter) return;
+
+  const response = await qdrantRequest(
+    "POST",
+    `/collections/${encodeURIComponent(collection)}/points/delete?wait=true`,
+    { filter },
+  );
+
+  if (response.status === 404) return;
+  await response.json();
+}
+
+async function deletePointsByIds(collection, pointIds) {
+  const ids = Array.isArray(pointIds)
+    ? pointIds.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  if (!ids.length) return;
+
+  const response = await qdrantRequest(
+    "POST",
+    `/collections/${encodeURIComponent(collection)}/points/delete?wait=true`,
+    { points: ids },
+  );
+
+  if (response.status === 404) return;
+  await response.json();
 }
 
 export async function scrollAll(collection, filter = null) {
@@ -133,7 +246,9 @@ export async function embedText(text) {
 
   if (!response.ok) {
     const textResponse = await response.text();
-    throw new Error(`Gemini embed ${response.status}: ${textResponse.slice(0, 300)}`);
+    throw new Error(
+      `Gemini embed ${response.status}: ${textResponse.slice(0, 300)}`,
+    );
   }
 
   const json = await response.json();
@@ -181,7 +296,9 @@ export async function callGemini(prompt, retries = 3) {
 
     if (!response.ok) {
       const textResponse = await response.text();
-      throw new Error(`Gemini generate ${response.status}: ${textResponse.slice(0, 300)}`);
+      throw new Error(
+        `Gemini generate ${response.status}: ${textResponse.slice(0, 300)}`,
+      );
     }
 
     const json = await response.json();
@@ -199,20 +316,23 @@ export async function invokeAppwriteFunction(functionId, payload) {
   requireValue(appwrite.projectId, "APPWRITE_PROJECT_ID is not configured");
   requireValue(appwrite.apiKey, "APPWRITE_API_KEY is not configured");
 
-  const response = await fetch(`${appwrite.endpoint}/functions/${functionId}/executions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Appwrite-Project": appwrite.projectId,
-      "X-Appwrite-Key": appwrite.apiKey,
-    },
-    body: JSON.stringify({
-      body: JSON.stringify(payload),
-      async: false,
+  const response = await fetch(
+    `${appwrite.endpoint}/functions/${functionId}/executions`,
+    {
       method: "POST",
-    }),
-    signal: AbortSignal.timeout(APPWRITE_SYNC_TIMEOUT_MS),
-  });
+      headers: {
+        "Content-Type": "application/json",
+        "X-Appwrite-Project": appwrite.projectId,
+        "X-Appwrite-Key": appwrite.apiKey,
+      },
+      body: JSON.stringify({
+        body: JSON.stringify(payload),
+        async: false,
+        method: "POST",
+      }),
+      signal: AbortSignal.timeout(APPWRITE_SYNC_TIMEOUT_MS),
+    },
+  );
 
   const raw = await response.text();
   if (!response.ok) {
@@ -227,11 +347,17 @@ export async function invokeAppwriteFunction(functionId, payload) {
   }
 
   if (execution.status !== "completed") {
-    throw new Error(`Function execution failed with status: ${execution.status}`);
+    throw new Error(
+      `Function execution failed with status: ${execution.status}`,
+    );
   }
 
   const body =
-    execution.responseBody ?? execution.response ?? execution.body ?? execution.output ?? "";
+    execution.responseBody ??
+    execution.response ??
+    execution.body ??
+    execution.output ??
+    "";
 
   if (!body) {
     throw new Error("Function completed but returned an empty response body");
@@ -240,7 +366,9 @@ export async function invokeAppwriteFunction(functionId, payload) {
   try {
     return JSON.parse(body);
   } catch {
-    throw new Error(`Function returned non-JSON body: ${String(body).slice(0, 200)}`);
+    throw new Error(
+      `Function returned non-JSON body: ${String(body).slice(0, 200)}`,
+    );
   }
 }
 
@@ -250,6 +378,281 @@ export async function fetchTopics() {
     .map((point) => String(point.payload?.text || "").trim())
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
+}
+
+function formatLocalDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function normalizeDateKey(rawDate) {
+  const value = String(rawDate || "").trim();
+  if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return value.slice(0, 10);
+  return formatLocalDateKey(value);
+}
+
+function truncateText(value, maxChars) {
+  const source = String(value || "").trim();
+  if (source.length <= maxChars) return source;
+  return `${source.slice(0, maxChars)}...`;
+}
+
+function hashSignature(parts) {
+  const joined = Array.isArray(parts) ? parts.join("||") : String(parts || "");
+  let hash = 2166136261;
+  for (let idx = 0; idx < joined.length; idx += 1) {
+    hash ^= joined.charCodeAt(idx);
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return `sig-${(hash >>> 0).toString(16)}`;
+}
+
+function createQdrantPointId(index = 0) {
+  try {
+    return randomUUID();
+  } catch {
+    // Fallback for runtimes without randomUUID support.
+    return Date.now() * 1000 + (index % 1000);
+  }
+}
+
+function buildReportSignature(reports) {
+  const stable = [...reports]
+    .map((report) => {
+      return [
+        String(report.id || ""),
+        String(report.topic || ""),
+        truncateText(report.report || "", 1800),
+        String(report.date || ""),
+      ].join("|");
+    })
+    .sort();
+
+  return hashSignature(stable);
+}
+
+function isValidFlashcard(card) {
+  if (!card || typeof card !== "object") return false;
+  const question = String(card.question || "").trim();
+  const answer = String(card.answer || "").trim();
+  return question.length >= 8 && answer.length >= 8;
+}
+
+function toFlashcard(card, index) {
+  return {
+    id: String(card.id || `card-${index + 1}`),
+    question: String(card.question || "").trim(),
+    answer: String(card.answer || "").trim(),
+  };
+}
+
+function parseGroqFlashcards(rawText) {
+  const source = String(rawText || "").trim();
+  if (!source) return [];
+
+  let jsonText = source;
+  const fenced = source.match(/```json\s*([\s\S]*?)\s*```/i);
+  if (fenced?.[1]) jsonText = fenced[1].trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    const objectMatch = jsonText.match(/\{[\s\S]*\}/);
+    if (!objectMatch) {
+      throw new Error("Groq returned invalid JSON for flashcards");
+    }
+    parsed = JSON.parse(objectMatch[0]);
+  }
+
+  const cards = Array.isArray(parsed?.flashcards) ? parsed.flashcards : [];
+  const unique = new Map();
+
+  cards
+    .filter(isValidFlashcard)
+    .map((card, index) => toFlashcard(card, index))
+    .forEach((card) => {
+      const key = card.question.toLowerCase();
+      if (!unique.has(key)) unique.set(key, card);
+    });
+
+  return [...unique.values()].slice(0, 24);
+}
+
+function buildFlashcardPrompt(todayReports, dateKey) {
+  const reportContext = todayReports
+    .map((report, index) => {
+      const topic = String(report.topic || "Untitled").trim();
+      const body = truncateText(report.report || "", 2400);
+      return `Report ${index + 1} | Topic: ${topic}\n${body}`;
+    })
+    .join("\n\n---\n\n");
+
+  return `Generate high-utility study flashcards from today's reports.
+
+Date: ${dateKey}
+
+Return ONLY valid JSON with this exact schema:
+{
+  "flashcards": [
+    {
+      "question": "...",
+      "answer": "..."
+    }
+  ]
+}
+
+Rules:
+- Produce 12 to 20 flashcards.
+- Questions must test understanding, not rote definitions.
+- Avoid duplicate questions and avoid yes/no questions.
+- Answers should be concise (1-4 sentences) and grounded in the provided context.
+- Cover key insights, mechanisms, tradeoffs, and actionable takeaways.
+- Do not invent facts outside the reports.
+
+Today's report context:
+${reportContext}`;
+}
+
+async function callGroqForFlashcards(todayReports, dateKey) {
+  const groq = getGroqConfig();
+  requireValue(groq.apiKey, "GROQ_API_KEY is not configured");
+
+  const prompt = buildFlashcardPrompt(todayReports, dateKey);
+  const response = await fetch(GROQ_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${groq.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: groq.model,
+      temperature: 0.25,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an expert learning coach that writes clear and practical active-recall flashcards.",
+        },
+        { role: "user", content: prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Groq ${response.status}: ${text.slice(0, 300)}`);
+  }
+
+  const json = await response.json();
+  const content = json?.choices?.[0]?.message?.content || "";
+  const flashcards = parseGroqFlashcards(content);
+
+  if (flashcards.length < 6) {
+    throw new Error("Groq returned too few usable flashcards");
+  }
+
+  return flashcards;
+}
+
+function selectActiveReportBatch(reports) {
+  const now = new Date();
+  const localDateKey = formatLocalDateKey(now);
+  const utcDateKey = now.toISOString().slice(0, 10);
+
+  const reportsByDate = new Map();
+  const reportsWithoutDate = [];
+
+  for (const report of reports) {
+    const key = normalizeDateKey(report.date);
+    if (!key) {
+      reportsWithoutDate.push(report);
+      continue;
+    }
+    if (!reportsByDate.has(key)) reportsByDate.set(key, []);
+    reportsByDate.get(key).push(report);
+  }
+
+  if (reportsByDate.has(localDateKey)) {
+    return { dateKey: localDateKey, reports: reportsByDate.get(localDateKey) };
+  }
+
+  if (reportsByDate.has(utcDateKey)) {
+    return { dateKey: utcDateKey, reports: reportsByDate.get(utcDateKey) };
+  }
+
+  if (reportsByDate.size > 0) {
+    const latestDateKey = [...reportsByDate.keys()].sort().at(-1);
+    return {
+      dateKey: latestDateKey,
+      reports: reportsByDate.get(latestDateKey) || [],
+    };
+  }
+
+  if (reportsWithoutDate.length > 0) {
+    return { dateKey: localDateKey, reports: reportsWithoutDate };
+  }
+
+  return { dateKey: localDateKey, reports: [] };
+}
+
+async function getTodayReportSnapshot() {
+  const reports = await fetchDailyReports();
+  const batch = selectActiveReportBatch(reports);
+  const todayReports = batch.reports;
+  const dateKey = batch.dateKey;
+  const signature = buildReportSignature(todayReports);
+  return { dateKey, todayReports, signature };
+}
+
+async function fetchCachedDailyFlashcards(dateKey, signature) {
+  const points = await scrollAll(COLLECTIONS.flashcards);
+  return points
+    .map((point) => {
+      const payload = point.payload || {};
+      return {
+        id: String(point.id),
+        question: String(payload.question || "").trim(),
+        answer: String(payload.answer || "").trim(),
+        order: Number(payload.order || 0),
+        sourceType: String(payload.sourceType || ""),
+        sourceDate: String(payload.sourceDate || ""),
+        sourceSignature: String(payload.sourceSignature || ""),
+      };
+    })
+    .filter(
+      (card) =>
+        card.question &&
+        card.sourceType === DAILY_FLASHCARD_SOURCE &&
+        card.sourceDate === dateKey &&
+        card.sourceSignature === signature,
+    )
+    .sort((a, b) => a.order - b.order)
+    .map(({ id, question, answer }) => ({ id, question, answer }));
+}
+
+async function clearDailyFlashcardsForDate(dateKey) {
+  const points = await scrollAll(COLLECTIONS.flashcards);
+  const toDelete = points
+    .filter((point) => {
+      const payload = point.payload || {};
+      return (
+        String(payload.sourceType || "") === DAILY_FLASHCARD_SOURCE &&
+        String(payload.sourceDate || "") === dateKey
+      );
+    })
+    .map((point) => String(point.id || ""))
+    .filter(Boolean);
+
+  await deletePointsByIds(COLLECTIONS.flashcards, toDelete);
 }
 
 function splitTopics(rawTopic) {
@@ -343,7 +746,11 @@ export async function fetchDailyReports() {
       id: String(point.id ?? index + 1),
       topic: String(payload.topic || "Untitled Report"),
       report: String(payload.report || payload.content || payload.text || ""),
-      date: payload.date ? String(payload.date) : payload.createdAt ? String(payload.createdAt) : null,
+      date: payload.date
+        ? String(payload.date)
+        : payload.createdAt
+          ? String(payload.createdAt)
+          : null,
       memoryChunks: Number(payload.memoryChunks || 0),
       kbChunks: Number(payload.kbChunks || 0),
       completed: false,
@@ -356,15 +763,66 @@ export async function fetchChecklistItems() {
 }
 
 export async function fetchFlashcards() {
-  const points = await scrollAll(COLLECTIONS.flashcards);
+  const { dateKey, todayReports, signature } = await getTodayReportSnapshot();
+  if (!todayReports.length) return [];
+  if (!signature) return [];
+  return fetchCachedDailyFlashcards(dateKey, signature);
+}
 
-  return points
-    .map((point) => ({
-      id: String(point.id),
-      question: String(point.payload?.question || point.payload?.front || point.payload?.text || ""),
-      answer: String(point.payload?.answer || point.payload?.back || ""),
-    }))
-    .filter((card) => card.question);
+export async function generateDailyFlashcards() {
+  const { dateKey, todayReports, signature } = await getTodayReportSnapshot();
+
+  if (!todayReports.length) {
+    throw new Error(
+      "No reports found for today. Generate today's reports first.",
+    );
+  }
+
+  if (!signature) {
+    throw new Error("Unable to build report signature for today's reports.");
+  }
+
+  const cached = await fetchCachedDailyFlashcards(dateKey, signature);
+  if (cached.length) {
+    return { flashcards: cached, cached: true };
+  }
+
+  const generated = await callGroqForFlashcards(todayReports, dateKey);
+
+  await clearDailyFlashcardsForDate(dateKey);
+
+  const generatedAt = new Date().toISOString();
+  const points = await Promise.all(
+    generated.map(async (card, index) => {
+      const contentForVector = `${card.question}\n\n${card.answer}`;
+      const vector = await embedText(contentForVector);
+      return {
+        id: createQdrantPointId(index),
+        vector,
+        payload: {
+          question: card.question,
+          answer: card.answer,
+          order: index,
+          sourceType: DAILY_FLASHCARD_SOURCE,
+          sourceDate: dateKey,
+          sourceSignature: signature,
+          generatedAt,
+          reportCount: todayReports.length,
+        },
+      };
+    }),
+  );
+
+  await upsertPoints(COLLECTIONS.flashcards, points);
+
+  return {
+    flashcards: generated.map((card, index) => ({
+      id: points[index].id,
+      question: card.question,
+      answer: card.answer,
+    })),
+    cached: false,
+  };
 }
 
 export async function generateCustomReport(topics) {
@@ -392,7 +850,9 @@ export async function generateCustomReport(topics) {
 
 export async function generatePromptReport(promptText, legacyTopics = []) {
   const normalizedPrompt = String(promptText || "").trim();
-  const queryText = normalizedPrompt || (Array.isArray(legacyTopics) ? legacyTopics.join(", ") : "");
+  const queryText =
+    normalizedPrompt ||
+    (Array.isArray(legacyTopics) ? legacyTopics.join(", ") : "");
   if (!queryText) throw new Error("A prompt or topics array is required");
 
   const queryVector = await embedText(queryText);
@@ -417,7 +877,11 @@ export async function generatePromptReport(promptText, legacyTopics = []) {
   }
 
   const knowledgeEntries = kbResults
-    .map((result) => String(result.payload?.text || "").trim().slice(0, 2000))
+    .map((result) =>
+      String(result.payload?.text || "")
+        .trim()
+        .slice(0, 2000),
+    )
     .filter(Boolean);
 
   const prompt = `You are a report generator for a personal knowledge management system.
@@ -425,9 +889,14 @@ export async function generatePromptReport(promptText, legacyTopics = []) {
 User request: ${queryText}
 
 --- USER NOTES ---
-${[...textByContent.values()]
-  .map((entry, index) => `${index + 1}. [${entry.topic} | ${entry.date}] ${entry.text}`)
-  .join("\n\n") || "(No relevant notes found)"}
+${
+  [...textByContent.values()]
+    .map(
+      (entry, index) =>
+        `${index + 1}. [${entry.topic} | ${entry.date}] ${entry.text}`,
+    )
+    .join("\n\n") || "(No relevant notes found)"
+}
 
 --- KNOWLEDGE BASE ENTRIES ---
 ${knowledgeEntries.map((entry, index) => `${index + 1}. ${entry}`).join("\n\n") || "(No relevant knowledge base entries found)"}
@@ -450,7 +919,9 @@ Instructions:
 }
 
 export async function runUploadPipeline(payload) {
-  const type = String(payload.type || "").trim().toLowerCase();
+  const type = String(payload.type || "")
+    .trim()
+    .toLowerCase();
   const language = String(payload.language || "en");
 
   let extractedText = "";
@@ -460,7 +931,8 @@ export async function runUploadPipeline(payload) {
     if (!extractedText) throw new Error("Text payload is required");
   } else if (type === "audio") {
     const audioBase64 = String(payload.audioBase64 || "").trim();
-    if (!audioBase64) throw new Error("audioBase64 is required for audio uploads");
+    if (!audioBase64)
+      throw new Error("audioBase64 is required for audio uploads");
 
     const audioRes = await invokeAppwriteFunction(getFunctionId("audio"), {
       audioBase64,
@@ -468,10 +940,13 @@ export async function runUploadPipeline(payload) {
       language,
     });
 
-    if (!audioRes.success) throw new Error(audioRes.error || "Audio transcription failed");
+    if (!audioRes.success)
+      throw new Error(audioRes.error || "Audio transcription failed");
     extractedText = String(audioRes.text || "").trim();
   } else if (type === "image") {
-    const imagesBase64 = Array.isArray(payload.imagesBase64) ? payload.imagesBase64 : [];
+    const imagesBase64 = Array.isArray(payload.imagesBase64)
+      ? payload.imagesBase64
+      : [];
     if (!imagesBase64.length) {
       throw new Error("imagesBase64 is required for image uploads");
     }
@@ -500,9 +975,12 @@ export async function runUploadPipeline(payload) {
     throw new Error("No text was extracted for processing");
   }
 
-  const clusterResponse = await invokeAppwriteFunction(getFunctionId("clustering"), {
-    paragraph: extractedText,
-  });
+  const clusterResponse = await invokeAppwriteFunction(
+    getFunctionId("clustering"),
+    {
+      paragraph: extractedText,
+    },
+  );
 
   if (!clusterResponse.success) {
     throw new Error(clusterResponse.error || "Text clustering failed");
@@ -521,7 +999,9 @@ export async function runUploadPipeline(payload) {
   const topics = [
     ...new Set(
       processResults
-        .flatMap((result) => (Array.isArray(result.topics) ? result.topics : []))
+        .flatMap((result) =>
+          Array.isArray(result.topics) ? result.topics : [],
+        )
         .map((topicObj) => String(topicObj.topic || "").trim())
         .filter(Boolean),
     ),

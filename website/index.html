@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-color-scheme="light">
+<html lang="en" data-color-scheme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -18,7 +18,7 @@
     <script>
       // Restore persisted theme before first paint
       (function () {
-        const saved = localStorage.getItem("alfred-theme") || "light";
+        const saved = localStorage.getItem("alfred-theme") || "dark";
         document.documentElement.setAttribute("data-color-scheme", saved);
       })();
     </script>

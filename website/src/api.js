@@ -61,6 +61,16 @@ export async function fetchFlashcards() {
   return data.flashcards || [];
 }
 
+export async function generateFlashcardsFromTodayReports() {
+  const data = await request("/flashcards", {
+    method: "POST",
+  });
+  return {
+    flashcards: data.flashcards || [],
+    cached: Boolean(data.cached),
+  };
+}
+
 export async function generateCustomReport(topics) {
   const data = await request("/custom-report", {
     method: "POST",

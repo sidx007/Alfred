@@ -6,7 +6,11 @@ import multer from "multer";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { WebSocket, WebSocketServer } from "ws";
-import { runUploadPipeline } from "./api/_lib/backend.js";
+import {
+    fetchFlashcards as fetchDailyFlashcards,
+    generateDailyFlashcards,
+    runUploadPipeline,
+} from "./api/_lib/backend.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -21,7 +25,9 @@ app.use(express.json({ limit: "50mb" }));
 // Keep API errors JSON-shaped even when request bodies are malformed.
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return res.status(400).json({ success: false, error: "Invalid JSON request body" });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid JSON request body" });
   }
   next(err);
 });
@@ -265,7 +271,10 @@ app.post("/api/upload", async (req, res) => {
     if (!["text", "audio", "image"].includes(type)) {
       return res
         .status(400)
-        .json({ success: false, error: "type must be one of: text, audio, image" });
+        .json({
+          success: false,
+          error: "type must be one of: text, audio, image",
+        });
     }
 
     const result = await runUploadPipeline(payload);
@@ -500,18 +509,25 @@ app.get("/api/daily-report", async (req, res) => {
 // GET /api/flashcards — fetch flashcards from flashcards collection
 app.get("/api/flashcards", async (req, res) => {
   try {
-    const points = await scrollAll(FLASHCARDS_COLLECTION);
-    const flashcards = points
-      .map((p) => ({
-        id: String(p.id),
-        question:
-          p.payload?.question || p.payload?.front || p.payload?.text || "",
-        answer: p.payload?.answer || p.payload?.back || "",
-      }))
-      .filter((f) => f.question);
+    const flashcards = await fetchDailyFlashcards();
     res.json({ success: true, flashcards });
   } catch (err) {
     console.error("GET /api/flashcards error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/flashcards — generate today's flashcards via Groq (cached per day/signature)
+app.post("/api/flashcards", async (req, res) => {
+  try {
+    const result = await generateDailyFlashcards();
+    res.json({
+      success: true,
+      flashcards: result.flashcards,
+      cached: Boolean(result.cached),
+    });
+  } catch (err) {
+    console.error("POST /api/flashcards error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -541,13 +557,19 @@ app.post("/api/custom-report", async (req, res) => {
     if (!Array.isArray(topics) || topics.length === 0) {
       return res
         .status(400)
-        .json({ success: false, error: "A non-empty 'topics' array is required" });
+        .json({
+          success: false,
+          error: "A non-empty 'topics' array is required",
+        });
     }
 
     const functionId = process.env.CUSTOMREPORTFUNCTION_ID || "";
     const projectId = process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID || "";
     const apiKey = process.env.EXPO_PUBLIC_APPWRITE_API_KEY || "";
-    const endpoint = process.env.APPWRITE_ENDPOINT || process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT || "https://sgp.cloud.appwrite.io/v1";
+    const endpoint =
+      process.env.APPWRITE_ENDPOINT ||
+      process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT ||
+      "https://sgp.cloud.appwrite.io/v1";
 
     if (!functionId || !projectId || !apiKey) {
       return res.status(500).json({
@@ -581,13 +603,17 @@ app.post("/api/custom-report", async (req, res) => {
 
     if (!createRes.ok) {
       const errText = await createRes.text();
-      throw new Error(`Appwrite execution ${createRes.status}: ${errText.slice(0, 300)}`);
+      throw new Error(
+        `Appwrite execution ${createRes.status}: ${errText.slice(0, 300)}`,
+      );
     }
 
     const result = await createRes.json();
 
     if (result.status !== "completed") {
-      throw new Error(`Execution ${result.status}: ${result.errors || "unknown error"}`);
+      throw new Error(
+        `Execution ${result.status}: ${result.errors || "unknown error"}`,
+      );
     }
 
     const responseBody = JSON.parse(result.responseBody || "{}");
@@ -664,13 +690,14 @@ app.post("/api/report", async (req, res) => {
 User's Report Request: ${queryText}
 
 --- USER'S NOTES ---
-${[...allTexts.values()]
-        .map(
-          (item, i) =>
-            `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`,
-        )
-        .join("\n\n") || "(No relevant notes found)"
-      }
+${
+  [...allTexts.values()]
+    .map(
+      (item, i) =>
+        `${i + 1}. [${item.topic || "General"} | ${item.date || "Unknown date"}] ${item.text}`,
+    )
+    .join("\n\n") || "(No relevant notes found)"
+}
 
 --- KNOWLEDGE BASE ENTRIES ---
 ${kbTexts.map((t, i) => `${i + 1}. ${t}`).join("\n\n") || "(No relevant knowledge base entries found)"}

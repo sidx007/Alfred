@@ -1,63 +1,67 @@
 import { marked } from "marked";
 import {
-	fetchChecklistItems,
-	fetchDailyReportTasks,
-	fetchFlashcards,
-	fetchTopicCounts,
-	fetchTopics,
-	generateCustomReport,
-	runUploadPipeline,
-	sendChatMessage,
+    fetchChecklistItems,
+    fetchDailyReportTasks,
+    fetchFlashcards,
+    fetchTopicCounts,
+    fetchTopics,
+    generateCustomReport,
+    generateFlashcardsFromTodayReports,
+    runUploadPipeline,
+    sendChatMessage,
 } from "./api.js";
 
 marked.setOptions({ gfm: true, breaks: true });
 
 const SUGGESTIONS = [
-	"What topics have I learned this week?",
-	"Summarize the most important ideas in my notes.",
-	"What should I revise next?",
-	"Explain my latest learning progress.",
-];
-
-const FALLBACK_FLASHCARDS = [
-	{
-		id: "fallback-1",
-		question: "What does TCP stand for?",
-		answer: "Transmission Control Protocol",
-	},
-	{
-		id: "fallback-2",
-		question: "What is the time complexity of binary search?",
-		answer: "O(log n)",
-	},
-	{
-		id: "fallback-3",
-		question: "What does REST stand for?",
-		answer: "Representational State Transfer",
-	},
+  "What topics have I learned this week?",
+  "Summarize the most important ideas in my notes.",
+  "What should I revise next?",
+  "Explain my latest learning progress.",
 ];
 
 const MAX_UPLOAD_RETRIES = 5;
 const RETRY_BASE_DELAY_MS = 2000;
+const DEFAULT_RSVP_WPM = 320;
+const MIN_RSVP_WPM = 120;
+const MAX_RSVP_WPM = 900;
+const RSVP_CONTEXT_RADIUS = 8;
+
+const readerState = {
+  title: "",
+  markdown: "",
+  plainText: "",
+  tokens: [],
+  index: 0,
+  mode: "markdown",
+  running: false,
+  timerId: null,
+  wpm: DEFAULT_RSVP_WPM,
+  contextVisible: true,
+  elapsedMs: 0,
+  lastTickAt: 0,
+};
 
 const state = {
-	activeTab: "home",
-	topics: [],
-	topicCounts: {},
-	dailyReports: [],
-	checklist: [],
-	checklistDone: new Set(),
-	flashcards: [],
-	flashcardRevealed: false,
-	chatMessages: [],
-	chatLoading: false,
-	selectedTopics: new Set(),
-	customLoading: false,
-	customReport: "",
-	customStats: null,
-	jobs: [],
-	queueRunning: false,
-	uploadDrawerOpen: false,
+  activeTab: "home",
+  topics: [],
+  topicCounts: {},
+  dailyReports: [],
+  checklist: [],
+  checklistDone: new Set(),
+  flashcards: [],
+  flashcardRevealed: false,
+  flashcardsLoading: false,
+  flashcardsStatus: "No flashcards generated for today yet.",
+  chatMessages: [],
+  chatLoading: false,
+  selectedTopics: new Set(),
+  customLoading: false,
+  customReport: "",
+  customStats: null,
+  jobs: [],
+  queueRunning: false,
+  uploadDrawerOpen: false,
 };
 
 const reportCache = new Map();
@@ -67,17 +71,20 @@ let idCounter = 0;
 boot();
 
 async function boot() {
-	renderShell();
-	bindEvents();
-	restoreTheme();
-	switchTab("home");
-	await hydrateData();
-	renderAll();
+  renderShell();
+  readerState.wpm = loadRsvpWpmPreference();
+  readerState.contextVisible = loadRsvpContextPreference();
+  readerState.mode = loadReaderModePreference();
+  bindEvents();
+  restoreTheme();
+  switchTab("home");
+  await hydrateData();
+  renderAll();
 }
 
 function renderShell() {
-	const app = document.getElementById("app");
-	app.innerHTML = `
+  const app = document.getElementById("app");
+  app.innerHTML = `
 		<div class="portal-shell">
 			<header class="masthead glass">
 				<div class="brand-block">
@@ -189,6 +196,11 @@ function renderShell() {
 						</div>
 					</div>
 
+          <div class="flashcard-toolbar">
+            <button id="flashcards-generate" class="primary-btn" type="button">Generate From Today's Reports</button>
+            <p id="flashcards-status" class="flashcard-status"></p>
+          </div>
+
 					<div id="flashcard-stage" class="flashcard-stage"></div>
 
 					<div id="flashcard-actions" class="flashcard-actions hidden">
@@ -221,226 +233,323 @@ function renderShell() {
 			</aside>
 		</div>
 
-		<div id="reader-overlay" class="reader-overlay hidden" role="dialog" aria-modal="true">
-			<article class="reader-card glass">
-				<header>
-					<h3 id="reader-title">Report</h3>
-					<button id="reader-close" class="ghost-btn" type="button">Close</button>
+    <div id="reader-overlay" class="reader-overlay hidden" role="dialog" aria-modal="true">
+      <article id="reader-card" class="reader-card glass">
+				<header class="reader-header">
+					<div class="reader-heading">
+						<h3 id="reader-title">Report</h3>
+						<p id="reader-subtitle">Read in classic or RSVP mode.</p>
+					</div>
+					<div class="reader-header-actions">
+						<button id="reader-mode-markdown" class="ghost-btn reader-mode-btn is-active" type="button">Classic</button>
+						<button id="reader-mode-rsvp" class="ghost-btn reader-mode-btn" type="button">RSVP</button>
+            <button id="reader-fullscreen" class="ghost-btn" type="button">Fullscreen</button>
+						<button id="reader-close" class="ghost-btn" type="button">Close</button>
+					</div>
 				</header>
 				<div id="reader-content" class="reader-content md-output"></div>
+				<section id="rsvp-view" class="rsvp-view hidden">
+					<div class="rsvp-meta">
+						<p id="rsvp-progress-label">0 / 0 words</p>
+						<p id="rsvp-time-label">Elapsed 0:00 · Left 0:00</p>
+					</div>
+					<div class="rsvp-progress-track" aria-hidden="true">
+						<span id="rsvp-progress-fill" class="rsvp-progress-fill"></span>
+					</div>
+
+					<div class="rsvp-stage">
+						<span class="rsvp-guide rsvp-guide-top" aria-hidden="true"></span>
+						<span class="rsvp-guide rsvp-guide-bottom" aria-hidden="true"></span>
+						<span class="rsvp-guide rsvp-guide-vertical" aria-hidden="true"></span>
+						<div class="rsvp-word" id="rsvp-word">
+							<span id="rsvp-left" class="rsvp-left"></span>
+							<span id="rsvp-orp" class="rsvp-orp"></span>
+							<span id="rsvp-right" class="rsvp-right"></span>
+						</div>
+					</div>
+
+					<p id="rsvp-context" class="rsvp-context"></p>
+
+					<div class="rsvp-controls">
+						<button id="rsvp-back-10" class="ghost-btn" type="button">-10</button>
+						<button id="rsvp-back-1" class="ghost-btn" type="button">-1</button>
+						<button id="rsvp-play" class="primary-btn" type="button">Play</button>
+						<button id="rsvp-forward-1" class="ghost-btn" type="button">+1</button>
+						<button id="rsvp-forward-10" class="ghost-btn" type="button">+10</button>
+						<button id="rsvp-restart" class="ghost-btn" type="button">Restart</button>
+					</div>
+
+					<div class="rsvp-speed-row">
+						<label class="rsvp-speed-label" for="rsvp-wpm">Speed <strong id="rsvp-wpm-value">${DEFAULT_RSVP_WPM}</strong> WPM</label>
+						<input id="rsvp-wpm" class="rsvp-wpm" type="range" min="${MIN_RSVP_WPM}" max="${MAX_RSVP_WPM}" step="10" value="${DEFAULT_RSVP_WPM}" />
+						<button id="rsvp-context-toggle" class="ghost-btn" type="button">Hide Context</button>
+					</div>
+
+					<p class="rsvp-hint">Keys: Space play/pause · J/L jump 10 · A/D speed · C context · R restart</p>
+				</section>
 			</article>
 		</div>
 	`;
 
-	refs = {
-		panels: Array.from(document.querySelectorAll(".panel")),
-		dockButtons: Array.from(document.querySelectorAll(".dock-btn")),
-		themeToggle: document.getElementById("theme-toggle"),
-		uploadPill: document.getElementById("upload-pill"),
-		homeStats: document.getElementById("home-stats"),
-		textCapture: document.getElementById("text-capture"),
-		textSubmit: document.getElementById("text-submit"),
-		audioFile: document.getElementById("audio-file"),
-		audioSubmit: document.getElementById("audio-submit"),
-		imageFile: document.getElementById("image-file"),
-		imageSubmit: document.getElementById("image-submit"),
-		topicCloud: document.getElementById("topic-cloud"),
-		dailyReportList: document.getElementById("daily-report-list"),
-		chatLog: document.getElementById("chat-log"),
-		chatInput: document.getElementById("chat-input"),
-		chatSend: document.getElementById("chat-send"),
-		customTopicChips: document.getElementById("custom-topic-chips"),
-		customGenerate: document.getElementById("custom-generate"),
-		customOutput: document.getElementById("custom-output"),
-		topicsSelectAll: document.getElementById("topics-select-all"),
-		topicsClear: document.getElementById("topics-clear"),
-		checklistList: document.getElementById("checklist-list"),
-		flashcardStage: document.getElementById("flashcard-stage"),
-		flashcardActions: document.getElementById("flashcard-actions"),
-		gradeAgain: document.getElementById("grade-again"),
-		gradeGood: document.getElementById("grade-good"),
-		gradeEasy: document.getElementById("grade-easy"),
-		uploadOverlay: document.getElementById("upload-overlay"),
-		uploadJobs: document.getElementById("upload-jobs"),
-		uploadClose: document.getElementById("upload-close"),
-		uploadClearDone: document.getElementById("upload-clear-done"),
-		readerOverlay: document.getElementById("reader-overlay"),
-		readerTitle: document.getElementById("reader-title"),
-		readerContent: document.getElementById("reader-content"),
-		readerClose: document.getElementById("reader-close"),
-	};
+  refs = {
+    panels: Array.from(document.querySelectorAll(".panel")),
+    dockButtons: Array.from(document.querySelectorAll(".dock-btn")),
+    themeToggle: document.getElementById("theme-toggle"),
+    uploadPill: document.getElementById("upload-pill"),
+    homeStats: document.getElementById("home-stats"),
+    textCapture: document.getElementById("text-capture"),
+    textSubmit: document.getElementById("text-submit"),
+    audioFile: document.getElementById("audio-file"),
+    audioSubmit: document.getElementById("audio-submit"),
+    imageFile: document.getElementById("image-file"),
+    imageSubmit: document.getElementById("image-submit"),
+    topicCloud: document.getElementById("topic-cloud"),
+    dailyReportList: document.getElementById("daily-report-list"),
+    chatLog: document.getElementById("chat-log"),
+    chatInput: document.getElementById("chat-input"),
+    chatSend: document.getElementById("chat-send"),
+    customTopicChips: document.getElementById("custom-topic-chips"),
+    customGenerate: document.getElementById("custom-generate"),
+    customOutput: document.getElementById("custom-output"),
+    topicsSelectAll: document.getElementById("topics-select-all"),
+    topicsClear: document.getElementById("topics-clear"),
+    checklistList: document.getElementById("checklist-list"),
+    flashcardsGenerate: document.getElementById("flashcards-generate"),
+    flashcardsStatus: document.getElementById("flashcards-status"),
+    flashcardStage: document.getElementById("flashcard-stage"),
+    flashcardActions: document.getElementById("flashcard-actions"),
+    gradeAgain: document.getElementById("grade-again"),
+    gradeGood: document.getElementById("grade-good"),
+    gradeEasy: document.getElementById("grade-easy"),
+    uploadOverlay: document.getElementById("upload-overlay"),
+    uploadJobs: document.getElementById("upload-jobs"),
+    uploadClose: document.getElementById("upload-close"),
+    uploadClearDone: document.getElementById("upload-clear-done"),
+    readerOverlay: document.getElementById("reader-overlay"),
+    readerCard: document.getElementById("reader-card"),
+    readerTitle: document.getElementById("reader-title"),
+    readerSubtitle: document.getElementById("reader-subtitle"),
+    readerContent: document.getElementById("reader-content"),
+    readerModeMarkdown: document.getElementById("reader-mode-markdown"),
+    readerModeRsvp: document.getElementById("reader-mode-rsvp"),
+    readerFullscreen: document.getElementById("reader-fullscreen"),
+    rsvpView: document.getElementById("rsvp-view"),
+    rsvpProgressLabel: document.getElementById("rsvp-progress-label"),
+    rsvpTimeLabel: document.getElementById("rsvp-time-label"),
+    rsvpProgressFill: document.getElementById("rsvp-progress-fill"),
+    rsvpLeft: document.getElementById("rsvp-left"),
+    rsvpOrp: document.getElementById("rsvp-orp"),
+    rsvpRight: document.getElementById("rsvp-right"),
+    rsvpContext: document.getElementById("rsvp-context"),
+    rsvpBack10: document.getElementById("rsvp-back-10"),
+    rsvpBack1: document.getElementById("rsvp-back-1"),
+    rsvpPlay: document.getElementById("rsvp-play"),
+    rsvpForward1: document.getElementById("rsvp-forward-1"),
+    rsvpForward10: document.getElementById("rsvp-forward-10"),
+    rsvpRestart: document.getElementById("rsvp-restart"),
+    rsvpWpm: document.getElementById("rsvp-wpm"),
+    rsvpWpmValue: document.getElementById("rsvp-wpm-value"),
+    rsvpContextToggle: document.getElementById("rsvp-context-toggle"),
+    readerClose: document.getElementById("reader-close"),
+  };
 }
 
 function bindEvents() {
-	refs.dockButtons.forEach((btn) => {
-		btn.addEventListener("click", () => {
-			switchTab(btn.dataset.tab);
-		});
-	});
+  refs.dockButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      switchTab(btn.dataset.tab);
+    });
+  });
 
-	refs.themeToggle.addEventListener("click", toggleTheme);
+  refs.themeToggle.addEventListener("click", toggleTheme);
 
-	refs.textSubmit.addEventListener("click", handleTextUpload);
-	refs.audioSubmit.addEventListener("click", handleAudioUpload);
-	refs.imageSubmit.addEventListener("click", handleImageUpload);
+  refs.textSubmit.addEventListener("click", handleTextUpload);
+  refs.audioSubmit.addEventListener("click", handleAudioUpload);
+  refs.imageSubmit.addEventListener("click", handleImageUpload);
 
-	refs.chatSend.addEventListener("click", handleChatSend);
-	refs.chatInput.addEventListener("keydown", (event) => {
-		if (event.key === "Enter" && !event.shiftKey) {
-			event.preventDefault();
-			handleChatSend();
-		}
-	});
+  refs.chatSend.addEventListener("click", handleChatSend);
+  refs.chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleChatSend();
+    }
+  });
 
-	refs.topicsSelectAll.addEventListener("click", () => {
-		state.selectedTopics = new Set(state.topics);
-		renderCustomTopics();
-		renderCustomOutput();
-	});
+  refs.topicsSelectAll.addEventListener("click", () => {
+    state.selectedTopics = new Set(state.topics);
+    renderCustomTopics();
+    renderCustomOutput();
+  });
 
-	refs.topicsClear.addEventListener("click", () => {
-		state.selectedTopics = new Set();
-		renderCustomTopics();
-		renderCustomOutput();
-	});
+  refs.topicsClear.addEventListener("click", () => {
+    state.selectedTopics = new Set();
+    renderCustomTopics();
+    renderCustomOutput();
+  });
 
-	refs.customGenerate.addEventListener("click", handleGenerateCustomReport);
+  refs.customGenerate.addEventListener("click", handleGenerateCustomReport);
 
-	refs.flashcardStage.addEventListener("click", () => {
-		if (!state.flashcards.length || state.flashcardRevealed) return;
-		state.flashcardRevealed = true;
-		renderFlashcards();
-	});
+  refs.flashcardStage.addEventListener("click", () => {
+    if (!state.flashcards.length || state.flashcardRevealed) return;
+    state.flashcardRevealed = true;
+    renderFlashcards();
+  });
 
-	refs.gradeAgain.addEventListener("click", () => gradeFlashcard("again"));
-	refs.gradeGood.addEventListener("click", () => gradeFlashcard("good"));
-	refs.gradeEasy.addEventListener("click", () => gradeFlashcard("easy"));
+  refs.gradeAgain.addEventListener("click", () => gradeFlashcard("again"));
+  refs.gradeGood.addEventListener("click", () => gradeFlashcard("good"));
+  refs.gradeEasy.addEventListener("click", () => gradeFlashcard("easy"));
+  refs.flashcardsGenerate.addEventListener(
+    "click",
+    handleGenerateDailyFlashcards,
+  );
 
-	refs.uploadPill.addEventListener("click", () => {
-		setUploadDrawerOpen(true);
-	});
+  refs.uploadPill.addEventListener("click", () => {
+    setUploadDrawerOpen(true);
+  });
 
-	refs.uploadClose.addEventListener("click", () => {
-		setUploadDrawerOpen(false);
-	});
+  refs.uploadClose.addEventListener("click", () => {
+    setUploadDrawerOpen(false);
+  });
 
-	refs.uploadOverlay.addEventListener("click", (event) => {
-		if (event.target === refs.uploadOverlay) setUploadDrawerOpen(false);
-	});
+  refs.uploadOverlay.addEventListener("click", (event) => {
+    if (event.target === refs.uploadOverlay) setUploadDrawerOpen(false);
+  });
 
-	refs.uploadClearDone.addEventListener("click", clearFinishedJobs);
+  refs.uploadClearDone.addEventListener("click", clearFinishedJobs);
 
-	refs.readerClose.addEventListener("click", closeReportReader);
-	refs.readerOverlay.addEventListener("click", (event) => {
-		if (event.target === refs.readerOverlay) closeReportReader();
-	});
+  refs.readerModeMarkdown.addEventListener("click", () =>
+    setReaderMode("markdown"),
+  );
+  refs.readerModeRsvp.addEventListener("click", () => setReaderMode("rsvp"));
+  refs.readerFullscreen.addEventListener("click", toggleReaderFullscreen);
+  refs.rsvpPlay.addEventListener("click", toggleRsvpPlayback);
+  refs.rsvpBack10.addEventListener("click", () => shiftRsvpIndex(-10));
+  refs.rsvpBack1.addEventListener("click", () => shiftRsvpIndex(-1));
+  refs.rsvpForward1.addEventListener("click", () => shiftRsvpIndex(1));
+  refs.rsvpForward10.addEventListener("click", () => shiftRsvpIndex(10));
+  refs.rsvpRestart.addEventListener("click", restartRsvpPlayback);
+  refs.rsvpWpm.addEventListener("input", () => {
+    setRsvpWpm(Number(refs.rsvpWpm.value));
+  });
+  refs.rsvpContextToggle.addEventListener("click", toggleRsvpContext);
 
-	document.addEventListener("keydown", (event) => {
-		if (event.key !== "Escape") return;
-		closeReportReader();
-		setUploadDrawerOpen(false);
-	});
+  refs.readerClose.addEventListener("click", closeReportReader);
+  refs.readerOverlay.addEventListener("click", (event) => {
+    if (event.target === refs.readerOverlay) closeReportReader();
+  });
+
+  document.addEventListener("fullscreenchange", syncReaderFullscreenButton);
+
+  document.addEventListener("keydown", handleGlobalKeydown);
 }
 
 async function hydrateData() {
-	const results = await Promise.allSettled([
-		fetchTopics(),
-		fetchTopicCounts(),
-		fetchDailyReportTasks(),
-		fetchChecklistItems(),
-		fetchFlashcards(),
-	]);
+  const results = await Promise.allSettled([
+    fetchTopics(),
+    fetchTopicCounts(),
+    fetchDailyReportTasks(),
+    fetchChecklistItems(),
+    fetchFlashcards(),
+  ]);
 
-	if (results[0].status === "fulfilled") {
-		state.topics = results[0].value;
-	} else {
-		console.error("Failed to load topics:", results[0].reason);
-		state.topics = [];
-	}
+  if (results[0].status === "fulfilled") {
+    state.topics = results[0].value;
+  } else {
+    console.error("Failed to load topics:", results[0].reason);
+    state.topics = [];
+  }
 
-	if (results[1].status === "fulfilled") {
-		state.topicCounts = results[1].value;
-	} else {
-		console.error("Failed to load topic counts:", results[1].reason);
-		state.topicCounts = {};
-	}
+  if (results[1].status === "fulfilled") {
+    state.topicCounts = results[1].value;
+  } else {
+    console.error("Failed to load topic counts:", results[1].reason);
+    state.topicCounts = {};
+  }
 
-	if (results[2].status === "fulfilled") {
-		state.dailyReports = Array.isArray(results[2].value) ? results[2].value : [];
-	} else {
-		console.error("Failed to load daily reports:", results[2].reason);
-		state.dailyReports = [];
-	}
+  if (results[2].status === "fulfilled") {
+    state.dailyReports = Array.isArray(results[2].value)
+      ? results[2].value
+      : [];
+  } else {
+    console.error("Failed to load daily reports:", results[2].reason);
+    state.dailyReports = [];
+  }
 
-	if (results[3].status === "fulfilled") {
-		const items = Array.isArray(results[3].value) ? results[3].value : [];
-		state.checklist = items.length ? items : state.dailyReports;
-	} else {
-		console.error("Failed to load checklist:", results[3].reason);
-		state.checklist = state.dailyReports;
-	}
+  if (results[3].status === "fulfilled") {
+    const items = Array.isArray(results[3].value) ? results[3].value : [];
+    state.checklist = items.length ? items : state.dailyReports;
+  } else {
+    console.error("Failed to load checklist:", results[3].reason);
+    state.checklist = state.dailyReports;
+  }
 
-	state.checklistDone = new Set(
-		state.checklist.filter((item) => item.completed).map((item) => String(item.id)),
-	);
+  state.checklistDone = new Set(
+    state.checklist
+      .filter((item) => item.completed)
+      .map((item) => String(item.id)),
+  );
 
-	if (results[4].status === "fulfilled") {
-		const cards = Array.isArray(results[4].value) ? results[4].value : [];
-		state.flashcards = cards.length ? cards : [...FALLBACK_FLASHCARDS];
-	} else {
-		console.error("Failed to load flashcards:", results[4].reason);
-		state.flashcards = [...FALLBACK_FLASHCARDS];
-	}
+  if (results[4].status === "fulfilled") {
+    const cards = Array.isArray(results[4].value) ? results[4].value : [];
+    state.flashcards = cards;
+    state.flashcardsStatus = cards.length
+      ? `Loaded ${cards.length} flashcards for today.`
+      : "No flashcards generated for today yet.";
+  } else {
+    console.error("Failed to load flashcards:", results[4].reason);
+    state.flashcards = [];
+    state.flashcardsStatus = "Could not load today's flashcards.";
+  }
 
-	state.flashcardRevealed = false;
+  state.flashcardRevealed = false;
 }
 
 function renderAll() {
-	renderHomeStats();
-	renderTopicCloud();
-	renderDailyReports();
-	renderChat();
-	renderCustomTopics();
-	renderCustomOutput();
-	renderChecklist();
-	renderFlashcards();
-	renderUploadPill();
-	renderUploadDrawer();
+  renderHomeStats();
+  renderTopicCloud();
+  renderDailyReports();
+  renderChat();
+  renderCustomTopics();
+  renderCustomOutput();
+  renderChecklist();
+  renderFlashcards();
+  renderUploadPill();
+  renderUploadDrawer();
 }
 
 function switchTab(tab) {
-	state.activeTab = tab;
-	refs.dockButtons.forEach((btn) => {
-		btn.classList.toggle("is-active", btn.dataset.tab === tab);
-	});
-	refs.panels.forEach((panel) => {
-		panel.classList.toggle("is-active", panel.dataset.panel === tab);
-	});
+  state.activeTab = tab;
+  refs.dockButtons.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.tab === tab);
+  });
+  refs.panels.forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.panel === tab);
+  });
 }
 
 function getTheme() {
-	return document.documentElement.getAttribute("data-color-scheme") || "light";
+  return document.documentElement.getAttribute("data-color-scheme") || "dark";
 }
 
 function restoreTheme() {
-	const saved = localStorage.getItem("alfred-theme") || "light";
-	document.documentElement.setAttribute("data-color-scheme", saved);
-	refs.themeToggle.textContent = saved === "dark" ? "Light" : "Dark";
+  const saved = localStorage.getItem("alfred-theme") || "dark";
+  document.documentElement.setAttribute("data-color-scheme", saved);
+  refs.themeToggle.textContent = saved === "dark" ? "Light" : "Dark";
 }
 
 function toggleTheme() {
-	const nextTheme = getTheme() === "dark" ? "light" : "dark";
-	document.documentElement.setAttribute("data-color-scheme", nextTheme);
-	localStorage.setItem("alfred-theme", nextTheme);
-	refs.themeToggle.textContent = nextTheme === "dark" ? "Light" : "Dark";
+  const nextTheme = getTheme() === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-color-scheme", nextTheme);
+  localStorage.setItem("alfred-theme", nextTheme);
+  refs.themeToggle.textContent = nextTheme === "dark" ? "Light" : "Dark";
 }
 
 function renderHomeStats() {
-	const topicCount = state.topics.length;
-	const reportCount = state.dailyReports.length;
-	const flashcardCount = state.flashcards.length;
+  const topicCount = state.topics.length;
+  const reportCount = state.dailyReports.length;
+  const flashcardCount = state.flashcards.length;
 
-	refs.homeStats.innerHTML = `
+  refs.homeStats.innerHTML = `
 		<article>
 			<h4>Topics</h4>
 			<p>${topicCount}</p>
@@ -457,32 +566,32 @@ function renderHomeStats() {
 }
 
 function renderTopicCloud() {
-	const entries = Object.entries(state.topicCounts).sort((a, b) => b[1] - a[1]);
-	if (!entries.length) {
-		refs.topicCloud.innerHTML = `<p class="empty-note">No topic counts available yet.</p>`;
-		return;
-	}
+  const entries = Object.entries(state.topicCounts).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    refs.topicCloud.innerHTML = `<p class="empty-note">No topic counts available yet.</p>`;
+    return;
+  }
 
-	refs.topicCloud.innerHTML = entries
-		.slice(0, 30)
-		.map(([name, count]) => {
-			const weight = Math.min(1, count / Math.max(entries[0][1], 1));
-			const alpha = (0.2 + weight * 0.5).toFixed(2);
-			return `<span class="topic-pill" style="--topic-alpha:${alpha}">${escapeHtml(name)} <strong>${count}</strong></span>`;
-		})
-		.join("");
+  refs.topicCloud.innerHTML = entries
+    .slice(0, 30)
+    .map(([name, count]) => {
+      const weight = Math.min(1, count / Math.max(entries[0][1], 1));
+      const alpha = (0.2 + weight * 0.5).toFixed(2);
+      return `<span class="topic-pill" style="--topic-alpha:${alpha}">${escapeHtml(name)} <strong>${count}</strong></span>`;
+    })
+    .join("");
 }
 
 function renderDailyReports() {
-	if (!state.dailyReports.length) {
-		refs.dailyReportList.innerHTML = `<p class="empty-note">No reports generated yet.</p>`;
-		return;
-	}
+  if (!state.dailyReports.length) {
+    refs.dailyReportList.innerHTML = `<p class="empty-note">No reports generated yet.</p>`;
+    return;
+  }
 
-	refs.dailyReportList.innerHTML = state.dailyReports
-		.map((report) => {
-			const dateLabel = report.date ? formatDate(report.date) : "No date";
-			return `
+  refs.dailyReportList.innerHTML = state.dailyReports
+    .map((report) => {
+      const dateLabel = report.date ? formatDate(report.date) : "No date";
+      return `
 				<article class="report-row">
 					<div>
 						<h4>${escapeHtml(report.topic || "Untitled")}</h4>
@@ -491,224 +600,256 @@ function renderDailyReports() {
 					<button class="ghost-btn report-open" type="button" data-report-id="${escapeHtml(String(report.id))}">Read</button>
 				</article>
 			`;
-		})
-		.join("");
+    })
+    .join("");
 
-	refs.dailyReportList.querySelectorAll(".report-open").forEach((button) => {
-		button.addEventListener("click", () => {
-			const report = state.dailyReports.find(
-				(item) => String(item.id) === String(button.dataset.reportId),
-			);
-			if (!report) return;
-			openReportReader(report.topic || "Daily Report", report.report || "");
-		});
-	});
+  refs.dailyReportList.querySelectorAll(".report-open").forEach((button) => {
+    button.addEventListener("click", () => {
+      const report = state.dailyReports.find(
+        (item) => String(item.id) === String(button.dataset.reportId),
+      );
+      if (!report) return;
+      openReportReader(report.topic || "Daily Report", report.report || "");
+    });
+  });
 }
 
 function renderChat() {
-	if (!state.chatMessages.length) {
-		refs.chatLog.innerHTML = `
+  if (!state.chatMessages.length) {
+    refs.chatLog.innerHTML = `
 			<section class="chat-welcome">
 				<h3>Ask the Assistant</h3>
 				<p>Chat with your existing memory and knowledge base context.</p>
 				<div class="suggestion-grid">
 					${SUGGESTIONS.map(
-						(suggestion) =>
-							`<button class="suggestion-btn" type="button">${escapeHtml(suggestion)}</button>`,
-					).join("")}
+            (suggestion) =>
+              `<button class="suggestion-btn" type="button">${escapeHtml(suggestion)}</button>`,
+          ).join("")}
 				</div>
 			</section>
 		`;
 
-		refs.chatLog.querySelectorAll(".suggestion-btn").forEach((button) => {
-			button.addEventListener("click", () => {
-				refs.chatInput.value = button.textContent;
-				handleChatSend();
-			});
-		});
-		return;
-	}
+    refs.chatLog.querySelectorAll(".suggestion-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        refs.chatInput.value = button.textContent;
+        handleChatSend();
+      });
+    });
+    return;
+  }
 
-	refs.chatLog.innerHTML = state.chatMessages
-		.map((message) => {
-			const content =
-				message.role === "assistant"
-					? safeMarkdown(message.content)
-					: `<p>${escapeHtml(message.content)}</p>`;
-			const topics = Array.isArray(message.topics) ? message.topics : [];
-			return `
+  refs.chatLog.innerHTML = state.chatMessages
+    .map((message) => {
+      const content =
+        message.role === "assistant"
+          ? safeMarkdown(message.content)
+          : `<p>${escapeHtml(message.content)}</p>`;
+      const topics = Array.isArray(message.topics) ? message.topics : [];
+      return `
 				<article class="chat-bubble ${message.role}">
 					<header>${message.role === "assistant" ? "Alfred" : "You"}</header>
 					<div class="md-output">${content}</div>
 					${
-						topics.length
-							? `<div class="bubble-topics">${topics
-									.map((topic) => `<span>${escapeHtml(topic)}</span>`)
-									.join("")}</div>`
-							: ""
-					}
+            topics.length
+              ? `<div class="bubble-topics">${topics
+                  .map((topic) => `<span>${escapeHtml(topic)}</span>`)
+                  .join("")}</div>`
+              : ""
+          }
 				</article>
 			`;
-		})
-		.join("");
+    })
+    .join("");
 
-	if (state.chatLoading) {
-		refs.chatLog.insertAdjacentHTML(
-			"beforeend",
-			`<article class="chat-bubble assistant"><header>Alfred</header><div class="loading-line">Thinking...</div></article>`,
-		);
-	}
+  if (state.chatLoading) {
+    refs.chatLog.insertAdjacentHTML(
+      "beforeend",
+      `<article class="chat-bubble assistant"><header>Alfred</header><div class="loading-line">Thinking...</div></article>`,
+    );
+  }
 
-	refs.chatLog.scrollTop = refs.chatLog.scrollHeight;
+  refs.chatLog.scrollTop = refs.chatLog.scrollHeight;
 }
 
 async function handleChatSend() {
-	const message = refs.chatInput.value.trim();
-	if (!message || state.chatLoading) return;
+  const message = refs.chatInput.value.trim();
+  if (!message || state.chatLoading) return;
 
-	refs.chatInput.value = "";
-	state.chatMessages.push({ role: "user", content: message, topics: [] });
-	state.chatLoading = true;
-	renderChat();
+  refs.chatInput.value = "";
+  state.chatMessages.push({ role: "user", content: message, topics: [] });
+  state.chatLoading = true;
+  renderChat();
 
-	try {
-		const response = await sendChatMessage(message);
-		state.chatMessages.push({
-			role: "assistant",
-			content: response.answer || "No answer returned.",
-			topics: response.topics || [],
-		});
-	} catch (error) {
-		state.chatMessages.push({
-			role: "assistant",
-			content: `Error: ${toErrorMessage(error)}`,
-			topics: [],
-		});
-	} finally {
-		state.chatLoading = false;
-		renderChat();
-	}
+  try {
+    const response = await sendChatMessage(message);
+    state.chatMessages.push({
+      role: "assistant",
+      content: response.answer || "No answer returned.",
+      topics: response.topics || [],
+    });
+  } catch (error) {
+    state.chatMessages.push({
+      role: "assistant",
+      content: `Error: ${toErrorMessage(error)}`,
+      topics: [],
+    });
+  } finally {
+    state.chatLoading = false;
+    renderChat();
+  }
 }
 
 function renderCustomTopics() {
-	if (!state.topics.length) {
-		refs.customTopicChips.innerHTML = `<p class="empty-note">No topics available yet.</p>`;
-		refs.customGenerate.disabled = true;
-		return;
-	}
+  if (!state.topics.length) {
+    refs.customTopicChips.innerHTML = `<p class="empty-note">No topics available yet.</p>`;
+    refs.customGenerate.disabled = true;
+    return;
+  }
 
-	refs.customTopicChips.innerHTML = state.topics
-		.map((topic) => {
-			const selected = state.selectedTopics.has(topic) ? "is-selected" : "";
-			return `<button class="topic-choice ${selected}" type="button" data-topic="${escapeHtml(topic)}">${escapeHtml(topic)}</button>`;
-		})
-		.join("");
+  refs.customTopicChips.innerHTML = state.topics
+    .map((topic) => {
+      const selected = state.selectedTopics.has(topic) ? "is-selected" : "";
+      return `<button class="topic-choice ${selected}" type="button" data-topic="${escapeHtml(topic)}">${escapeHtml(topic)}</button>`;
+    })
+    .join("");
 
-	refs.customTopicChips.querySelectorAll(".topic-choice").forEach((button) => {
-		button.addEventListener("click", () => {
-			const topic = button.dataset.topic || "";
-			if (!topic) return;
-			if (state.selectedTopics.has(topic)) {
-				state.selectedTopics.delete(topic);
-			} else {
-				state.selectedTopics.add(topic);
-			}
-			renderCustomTopics();
-			renderCustomOutput();
-		});
-	});
+  refs.customTopicChips.querySelectorAll(".topic-choice").forEach((button) => {
+    button.addEventListener("click", () => {
+      const topic = button.dataset.topic || "";
+      if (!topic) return;
+      if (state.selectedTopics.has(topic)) {
+        state.selectedTopics.delete(topic);
+      } else {
+        state.selectedTopics.add(topic);
+      }
+      renderCustomTopics();
+      renderCustomOutput();
+    });
+  });
 
-	refs.customGenerate.disabled = state.selectedTopics.size === 0 || state.customLoading;
+  refs.customGenerate.disabled =
+    state.selectedTopics.size === 0 || state.customLoading;
 }
 
 function renderCustomOutput() {
-	if (state.customLoading) {
-		refs.customOutput.innerHTML = `<div class="loading-block">Generating report...</div>`;
-		refs.customGenerate.disabled = true;
-		return;
-	}
+  if (state.customLoading) {
+    refs.customOutput.innerHTML = `<div class="loading-block">Generating report...</div>`;
+    refs.customGenerate.disabled = true;
+    return;
+  }
 
-	refs.customGenerate.disabled = state.selectedTopics.size === 0;
+  refs.customGenerate.disabled = state.selectedTopics.size === 0;
 
-	if (!state.customReport) {
-		const count = state.selectedTopics.size;
-		refs.customOutput.innerHTML = `
+  if (!state.customReport) {
+    const count = state.selectedTopics.size;
+    refs.customOutput.innerHTML = `
 			<div class="empty-block">
 				${
-					count
-						? `Ready to generate a report for <strong>${count}</strong> selected topic${count === 1 ? "" : "s"}.`
-						: "Select one or more topics to generate a custom report."
-				}
+          count
+            ? `Ready to generate a report for <strong>${count}</strong> selected topic${count === 1 ? "" : "s"}.`
+            : "Select one or more topics to generate a custom report."
+        }
 			</div>
 		`;
-		return;
-	}
+    return;
+  }
 
-	refs.customOutput.innerHTML = `
+  refs.customOutput.innerHTML = `
 		<div class="report-headline">
 			<p>${state.selectedTopics.size} topic${state.selectedTopics.size === 1 ? "" : "s"} selected</p>
 			${
-				state.customStats
-					? `<p>${state.customStats.memoryPoints} memory · ${state.customStats.knowledgePoints} KB chunks</p>`
-					: ""
-			}
+        state.customStats
+          ? `<p>${state.customStats.memoryPoints} memory · ${state.customStats.knowledgePoints} KB chunks</p>`
+          : ""
+      }
+		</div>
+		<div class="report-tools">
+			<button id="custom-open-reader" class="ghost-btn" type="button">Read With RSVP</button>
+			<button id="custom-copy-report" class="ghost-btn" type="button">Copy Report</button>
 		</div>
 		<div class="md-output">${safeMarkdown(state.customReport)}</div>
 	`;
+
+  const openReaderButton = refs.customOutput.querySelector(
+    "#custom-open-reader",
+  );
+  if (openReaderButton) {
+    openReaderButton.addEventListener("click", () => {
+      openReportReader("Custom Report", state.customReport, "rsvp");
+    });
+  }
+
+  const copyButton = refs.customOutput.querySelector("#custom-copy-report");
+  if (copyButton) {
+    copyButton.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(state.customReport || "");
+        copyButton.textContent = "Copied";
+        setTimeout(() => {
+          copyButton.textContent = "Copy Report";
+        }, 1800);
+      } catch (_error) {
+        copyButton.textContent = "Copy Failed";
+        setTimeout(() => {
+          copyButton.textContent = "Copy Report";
+        }, 1800);
+      }
+    });
+  }
 }
 
 async function handleGenerateCustomReport() {
-	if (state.selectedTopics.size === 0 || state.customLoading) return;
+  if (state.selectedTopics.size === 0 || state.customLoading) return;
 
-	const selected = [...state.selectedTopics].sort();
-	const key = selected.join("||");
+  const selected = [...state.selectedTopics].sort();
+  const key = selected.join("||");
 
-	if (reportCache.has(key)) {
-		const cached = reportCache.get(key);
-		state.customReport = cached.report;
-		state.customStats = cached.stats;
-		renderCustomOutput();
-		return;
-	}
+  if (reportCache.has(key)) {
+    const cached = reportCache.get(key);
+    state.customReport = cached.report;
+    state.customStats = cached.stats;
+    renderCustomOutput();
+    return;
+  }
 
-	state.customLoading = true;
-	state.customReport = "";
-	state.customStats = null;
-	renderCustomOutput();
+  state.customLoading = true;
+  state.customReport = "";
+  state.customStats = null;
+  renderCustomOutput();
 
-	try {
-		const result = await generateCustomReport(selected);
-		state.customReport = result.report || "No report returned.";
-		state.customStats = result.stats || {
-			memoryPoints: 0,
-			knowledgePoints: 0,
-		};
-		reportCache.set(key, {
-			report: state.customReport,
-			stats: state.customStats,
-		});
-	} catch (error) {
-		state.customReport = `Error: ${toErrorMessage(error)}`;
-		state.customStats = null;
-	} finally {
-		state.customLoading = false;
-		renderCustomTopics();
-		renderCustomOutput();
-	}
+  try {
+    const result = await generateCustomReport(selected);
+    state.customReport = result.report || "No report returned.";
+    state.customStats = result.stats || {
+      memoryPoints: 0,
+      knowledgePoints: 0,
+    };
+    reportCache.set(key, {
+      report: state.customReport,
+      stats: state.customStats,
+    });
+  } catch (error) {
+    state.customReport = `Error: ${toErrorMessage(error)}`;
+    state.customStats = null;
+  } finally {
+    state.customLoading = false;
+    renderCustomTopics();
+    renderCustomOutput();
+  }
 }
 
 function renderChecklist() {
-	if (!state.checklist.length) {
-		refs.checklistList.innerHTML = `<p class="empty-note">No checklist items available yet.</p>`;
-		return;
-	}
+  if (!state.checklist.length) {
+    refs.checklistList.innerHTML = `<p class="empty-note">No checklist items available yet.</p>`;
+    return;
+  }
 
-	refs.checklistList.innerHTML = state.checklist
-		.map((task) => {
-			const taskId = String(task.id);
-			const checked = state.checklistDone.has(taskId) ? "is-checked" : "";
-			const dateLabel = task.date ? formatDate(task.date) : "No date";
-			return `
+  refs.checklistList.innerHTML = state.checklist
+    .map((task) => {
+      const taskId = String(task.id);
+      const checked = state.checklistDone.has(taskId) ? "is-checked" : "";
+      const dateLabel = task.date ? formatDate(task.date) : "No date";
+      return `
 				<article class="check-item ${checked}">
 					<button class="check-toggle" type="button" data-check-id="${escapeHtml(taskId)}" aria-label="Toggle completion">${state.checklistDone.has(taskId) ? "x" : ""}</button>
 					<div class="check-body">
@@ -718,335 +859,408 @@ function renderChecklist() {
 					<button class="ghost-btn check-read" type="button" data-read-id="${escapeHtml(taskId)}">Read Report</button>
 				</article>
 			`;
-		})
-		.join("");
+    })
+    .join("");
 
-	refs.checklistList.querySelectorAll(".check-toggle").forEach((button) => {
-		button.addEventListener("click", () => {
-			const taskId = String(button.dataset.checkId);
-			if (state.checklistDone.has(taskId)) {
-				state.checklistDone.delete(taskId);
-			} else {
-				state.checklistDone.add(taskId);
-			}
-			renderChecklist();
-		});
-	});
+  refs.checklistList.querySelectorAll(".check-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      const taskId = String(button.dataset.checkId);
+      if (state.checklistDone.has(taskId)) {
+        state.checklistDone.delete(taskId);
+      } else {
+        state.checklistDone.add(taskId);
+      }
+      renderChecklist();
+    });
+  });
 
-	refs.checklistList.querySelectorAll(".check-read").forEach((button) => {
-		button.addEventListener("click", () => {
-			const task = state.checklist.find(
-				(item) => String(item.id) === String(button.dataset.readId),
-			);
-			if (!task) return;
-			openReportReader(task.topic || "Checklist Report", task.report || "");
-		});
-	});
+  refs.checklistList.querySelectorAll(".check-read").forEach((button) => {
+    button.addEventListener("click", () => {
+      const task = state.checklist.find(
+        (item) => String(item.id) === String(button.dataset.readId),
+      );
+      if (!task) return;
+      openReportReader(task.topic || "Checklist Report", task.report || "");
+    });
+  });
 }
 
 function renderFlashcards() {
-	if (!state.flashcards.length) {
-		refs.flashcardStage.innerHTML = `<article class="flashcard empty"><h3>Deck complete</h3><p>Great work. New flashcards will appear after your next pipeline run.</p></article>`;
-		refs.flashcardActions.classList.add("hidden");
-		return;
-	}
+  refs.flashcardsGenerate.disabled = state.flashcardsLoading;
+  refs.flashcardsGenerate.textContent = state.flashcardsLoading
+    ? "Generating..."
+    : "Generate From Today's Reports";
+  refs.flashcardsStatus.textContent = state.flashcardsStatus || "";
 
-	const card = state.flashcards[0];
-	refs.flashcardStage.innerHTML = `
+  if (state.flashcardsLoading && !state.flashcards.length) {
+    refs.flashcardStage.innerHTML = `<article class="flashcard empty"><h3>Generating flashcards</h3><p>Building active-recall cards from today's reports...</p></article>`;
+    refs.flashcardActions.classList.add("hidden");
+    return;
+  }
+
+  if (!state.flashcards.length) {
+    refs.flashcardStage.innerHTML = `<article class="flashcard empty"><h3>No flashcards yet</h3><p>Press Generate to create high-value flashcards from today's reports.</p></article>`;
+    refs.flashcardActions.classList.add("hidden");
+    return;
+  }
+
+  const card = state.flashcards[0];
+  refs.flashcardStage.innerHTML = `
 		<article class="flashcard ${state.flashcardRevealed ? "revealed" : ""}">
 			<p class="flashcard-counter">${state.flashcards.length} remaining</p>
 			<h3>${escapeHtml(card.question || "Question")}</h3>
 			${
-				state.flashcardRevealed
-					? `<div class="flashcard-answer md-output">${safeMarkdown(card.answer || "")}</div>`
-					: `<p class="flashcard-hint">Tap to reveal answer</p>`
-			}
+        state.flashcardRevealed
+          ? `<div class="flashcard-answer md-output">${safeMarkdown(card.answer || "")}</div>`
+          : `<p class="flashcard-hint">Tap to reveal answer</p>`
+      }
 		</article>
 	`;
 
-	refs.flashcardActions.classList.toggle("hidden", !state.flashcardRevealed);
+  refs.flashcardActions.classList.toggle("hidden", !state.flashcardRevealed);
+}
+
+async function handleGenerateDailyFlashcards() {
+  if (state.flashcardsLoading) return;
+
+  state.flashcardsLoading = true;
+  state.flashcardsStatus = "Generating flashcards from today's reports...";
+  renderFlashcards();
+
+  try {
+    const result = await generateFlashcardsFromTodayReports();
+    const cards = Array.isArray(result.flashcards) ? result.flashcards : [];
+    state.flashcards = cards;
+    state.flashcardRevealed = false;
+
+    if (cards.length) {
+      state.flashcardsStatus = result.cached
+        ? `Loaded ${cards.length} cached flashcards for today's reports.`
+        : `Generated ${cards.length} flashcards from today's reports.`;
+    } else {
+      state.flashcardsStatus = "No flashcards were generated for today.";
+    }
+  } catch (error) {
+    state.flashcardsStatus = `Generation failed: ${toErrorMessage(error)}`;
+  } finally {
+    state.flashcardsLoading = false;
+    renderFlashcards();
+    renderHomeStats();
+  }
 }
 
 function gradeFlashcard(mode) {
-	if (!state.flashcards.length || !state.flashcardRevealed) return;
+  if (!state.flashcards.length || !state.flashcardRevealed) return;
 
-	const [current, ...rest] = state.flashcards;
-	if (!current) return;
+  const [current, ...rest] = state.flashcards;
+  if (!current) return;
 
-	if (mode === "again") {
-		const insertAt = Math.max(rest.length - 1, 0);
-		rest.splice(insertAt, 0, current);
-		state.flashcards = rest;
-	} else {
-		state.flashcards = rest;
-	}
+  if (mode === "again") {
+    const insertAt = Math.max(rest.length - 1, 0);
+    rest.splice(insertAt, 0, current);
+    state.flashcards = rest;
+  } else {
+    state.flashcards = rest;
+  }
 
-	state.flashcardRevealed = false;
-	renderFlashcards();
-	renderHomeStats();
+  if (!state.flashcards.length) {
+    state.flashcardsStatus =
+      "Session complete. Cards remain saved for today and can be regenerated if reports change.";
+  }
+
+  state.flashcardRevealed = false;
+  renderFlashcards();
+  renderHomeStats();
 }
 
 async function handleTextUpload() {
-	const text = refs.textCapture.value.trim();
-	if (!text) return;
-	refs.textCapture.value = "";
-	enqueueJob("text", "Text note", { type: "text", text, language: "en" });
+  const text = refs.textCapture.value.trim();
+  if (!text) return;
+  refs.textCapture.value = "";
+  enqueueJob("text", "Text note", { type: "text", text, language: "en" });
 }
 
 async function handleAudioUpload() {
-	const file = refs.audioFile.files?.[0];
-	if (!file) return;
+  const file = refs.audioFile.files?.[0];
+  if (!file) return;
 
-	try {
-		const audioBase64 = await fileToBase64(file);
-		enqueueJob("audio", file.name || "Audio note", {
-			type: "audio",
-			audioBase64,
-			contentType: file.type || "audio/m4a",
-			language: "en",
-		});
-		refs.audioFile.value = "";
-	} catch (error) {
-		enqueueErrorJob("audio", file.name || "Audio note", toErrorMessage(error));
-	}
+  try {
+    const audioBase64 = await fileToBase64(file);
+    enqueueJob("audio", file.name || "Audio note", {
+      type: "audio",
+      audioBase64,
+      contentType: file.type || "audio/m4a",
+      language: "en",
+    });
+    refs.audioFile.value = "";
+  } catch (error) {
+    enqueueErrorJob("audio", file.name || "Audio note", toErrorMessage(error));
+  }
 }
 
 async function handleImageUpload() {
-	const files = Array.from(refs.imageFile.files || []);
-	if (!files.length) return;
+  const files = Array.from(refs.imageFile.files || []);
+  if (!files.length) return;
 
-	try {
-		const imagesBase64 = await Promise.all(files.map((file) => fileToBase64(file)));
-		enqueueJob("image", `${files.length} image${files.length === 1 ? "" : "s"}`, {
-			type: "image",
-			imagesBase64,
-			language: "en",
-		});
-		refs.imageFile.value = "";
-	} catch (error) {
-		enqueueErrorJob(
-			"image",
-			`${files.length} image${files.length === 1 ? "" : "s"}`,
-			toErrorMessage(error),
-		);
-	}
+  try {
+    const imagesBase64 = await Promise.all(
+      files.map((file) => fileToBase64(file)),
+    );
+    enqueueJob(
+      "image",
+      `${files.length} image${files.length === 1 ? "" : "s"}`,
+      {
+        type: "image",
+        imagesBase64,
+        language: "en",
+      },
+    );
+    refs.imageFile.value = "";
+  } catch (error) {
+    enqueueErrorJob(
+      "image",
+      `${files.length} image${files.length === 1 ? "" : "s"}`,
+      toErrorMessage(error),
+    );
+  }
 }
 
 function enqueueErrorJob(type, label, errorMessage) {
-	state.jobs.unshift({
-		id: nextId(),
-		type,
-		label,
-		payload: null,
-		status: "failed",
-		progress: "Failed before upload",
-		completedSteps: [],
-		attempts: 1,
-		maxAttempts: 1,
-		error: errorMessage,
-		createdAt: Date.now(),
-	});
-	renderUploadPill();
-	renderUploadDrawer();
+  state.jobs.unshift({
+    id: nextId(),
+    type,
+    label,
+    payload: null,
+    status: "failed",
+    progress: "Failed before upload",
+    completedSteps: [],
+    attempts: 1,
+    maxAttempts: 1,
+    error: errorMessage,
+    createdAt: Date.now(),
+  });
+  renderUploadPill();
+  renderUploadDrawer();
 }
 
 function enqueueJob(type, label, payload) {
-	state.jobs.unshift({
-		id: nextId(),
-		type,
-		label,
-		payload,
-		status: "queued",
-		progress: "Queued",
-		completedSteps: ["Queued"],
-		attempts: 0,
-		maxAttempts: MAX_UPLOAD_RETRIES,
-		error: "",
-		createdAt: Date.now(),
-	});
-	renderUploadPill();
-	renderUploadDrawer();
-	runQueue();
+  state.jobs.unshift({
+    id: nextId(),
+    type,
+    label,
+    payload,
+    status: "queued",
+    progress: "Queued",
+    completedSteps: ["Queued"],
+    attempts: 0,
+    maxAttempts: MAX_UPLOAD_RETRIES,
+    error: "",
+    createdAt: Date.now(),
+  });
+  renderUploadPill();
+  renderUploadDrawer();
+  runQueue();
 }
 
 async function runQueue() {
-	if (state.queueRunning) return;
-	state.queueRunning = true;
+  if (state.queueRunning) return;
+  state.queueRunning = true;
 
-	try {
-		while (true) {
-			const job = state.jobs.find((candidate) => candidate.status === "queued");
-			if (!job) break;
-			await executeJob(job);
-		}
-	} finally {
-		state.queueRunning = false;
-		renderUploadPill();
-		renderUploadDrawer();
-	}
+  try {
+    while (true) {
+      const job = state.jobs.find((candidate) => candidate.status === "queued");
+      if (!job) break;
+      await executeJob(job);
+    }
+  } finally {
+    state.queueRunning = false;
+    renderUploadPill();
+    renderUploadDrawer();
+  }
 }
 
 async function executeJob(job) {
-	job.status = "running";
-	job.progress = "Sending payload";
-	pushJobStep(job, "Sending payload");
-	renderUploadPill();
-	renderUploadDrawer();
+  job.status = "running";
+  job.progress = "Sending payload";
+  pushJobStep(job, "Sending payload");
+  renderUploadPill();
+  renderUploadDrawer();
 
-	try {
-		const result = await runUploadPipeline(job.payload);
-		const processed = Number(result.summary?.processed || 0);
-		const segments = Number(result.summary?.segments || 0);
-		pushJobStep(job, `Processed ${processed} result${processed === 1 ? "" : "s"}`);
-		pushJobStep(job, `Detected ${segments} segment${segments === 1 ? "" : "s"}`);
+  try {
+    const result = await runUploadPipeline(job.payload);
+    const processed = Number(result.summary?.processed || 0);
+    const segments = Number(result.summary?.segments || 0);
+    pushJobStep(
+      job,
+      `Processed ${processed} result${processed === 1 ? "" : "s"}`,
+    );
+    pushJobStep(
+      job,
+      `Detected ${segments} segment${segments === 1 ? "" : "s"}`,
+    );
 
-		if (Array.isArray(result.topics) && result.topics.length) {
-			pushJobStep(
-				job,
-				`Topics: ${result.topics.slice(0, 4).join(", ")}${result.topics.length > 4 ? "..." : ""}`,
-			);
-		}
+    if (Array.isArray(result.topics) && result.topics.length) {
+      pushJobStep(
+        job,
+        `Topics: ${result.topics.slice(0, 4).join(", ")}${result.topics.length > 4 ? "..." : ""}`,
+      );
+    }
 
-		job.status = "completed";
-		job.progress = "Completed";
-		job.error = "";
+    job.status = "completed";
+    job.progress = "Completed";
+    job.error = "";
 
-		await refreshAfterUpload();
-	} catch (error) {
-		job.attempts += 1;
-		job.error = toErrorMessage(error);
+    await refreshAfterUpload();
+  } catch (error) {
+    job.attempts += 1;
+    job.error = toErrorMessage(error);
 
-		if (job.attempts < job.maxAttempts) {
-			const delay = RETRY_BASE_DELAY_MS * Math.pow(2, job.attempts - 1);
-			job.status = "retrying";
-			job.progress = `Retrying in ${Math.round(delay / 1000)}s`;
-			pushJobStep(job, job.progress);
-			renderUploadPill();
-			renderUploadDrawer();
-			await sleep(delay);
-			job.status = "queued";
-			job.progress = "Queued";
-			renderUploadPill();
-			renderUploadDrawer();
-		} else {
-			job.status = "failed";
-			job.progress = "Failed";
-		}
-	}
+    if (job.attempts < job.maxAttempts) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, job.attempts - 1);
+      job.status = "retrying";
+      job.progress = `Retrying in ${Math.round(delay / 1000)}s`;
+      pushJobStep(job, job.progress);
+      renderUploadPill();
+      renderUploadDrawer();
+      await sleep(delay);
+      job.status = "queued";
+      job.progress = "Queued";
+      renderUploadPill();
+      renderUploadDrawer();
+    } else {
+      job.status = "failed";
+      job.progress = "Failed";
+    }
+  }
 
-	renderUploadPill();
-	renderUploadDrawer();
+  renderUploadPill();
+  renderUploadDrawer();
 }
 
 async function refreshAfterUpload() {
-	const results = await Promise.allSettled([
-		fetchTopics(),
-		fetchTopicCounts(),
-		fetchDailyReportTasks(),
-		fetchChecklistItems(),
-		fetchFlashcards(),
-	]);
+  const results = await Promise.allSettled([
+    fetchTopics(),
+    fetchTopicCounts(),
+    fetchDailyReportTasks(),
+    fetchChecklistItems(),
+    fetchFlashcards(),
+  ]);
 
-	if (results[0].status === "fulfilled") state.topics = results[0].value;
-	if (results[1].status === "fulfilled") state.topicCounts = results[1].value;
-	if (results[2].status === "fulfilled") state.dailyReports = results[2].value;
-	if (results[3].status === "fulfilled") {
-		state.checklist = results[3].value.length ? results[3].value : state.dailyReports;
-	}
-	if (results[4].status === "fulfilled") {
-		const cards = results[4].value;
-		state.flashcards = cards.length ? cards : [...FALLBACK_FLASHCARDS];
-		state.flashcardRevealed = false;
-	}
+  if (results[0].status === "fulfilled") state.topics = results[0].value;
+  if (results[1].status === "fulfilled") state.topicCounts = results[1].value;
+  if (results[2].status === "fulfilled") state.dailyReports = results[2].value;
+  if (results[3].status === "fulfilled") {
+    state.checklist = results[3].value.length
+      ? results[3].value
+      : state.dailyReports;
+  }
+  if (results[4].status === "fulfilled") {
+    const cards = results[4].value;
+    state.flashcards = Array.isArray(cards) ? cards : [];
+    state.flashcardsStatus = state.flashcards.length
+      ? `Loaded ${state.flashcards.length} flashcards for today.`
+      : "No flashcards generated for today yet.";
+    state.flashcardRevealed = false;
+  } else {
+    state.flashcards = [];
+    state.flashcardsStatus = "Could not load today's flashcards.";
+  }
 
-	renderHomeStats();
-	renderTopicCloud();
-	renderDailyReports();
-	renderChecklist();
-	renderFlashcards();
-	renderCustomTopics();
-	renderCustomOutput();
+  renderHomeStats();
+  renderTopicCloud();
+  renderDailyReports();
+  renderChecklist();
+  renderFlashcards();
+  renderCustomTopics();
+  renderCustomOutput();
 }
 
 function pushJobStep(job, step) {
-	if (!step) return;
-	if (job.completedSteps[job.completedSteps.length - 1] === step) return;
-	job.completedSteps.push(step);
+  if (!step) return;
+  if (job.completedSteps[job.completedSteps.length - 1] === step) return;
+  job.completedSteps.push(step);
 }
 
 function clearFinishedJobs() {
-	state.jobs = state.jobs.filter(
-		(job) => job.status !== "completed" && job.status !== "failed",
-	);
-	renderUploadPill();
-	renderUploadDrawer();
+  state.jobs = state.jobs.filter(
+    (job) => job.status !== "completed" && job.status !== "failed",
+  );
+  renderUploadPill();
+  renderUploadDrawer();
 }
 
 function retryJob(jobId) {
-	const job = state.jobs.find((candidate) => candidate.id === jobId);
-	if (!job || job.status !== "failed") return;
-	job.status = "queued";
-	job.progress = "Queued";
-	job.error = "";
-	job.attempts = 0;
-	job.completedSteps = ["Queued"];
-	renderUploadPill();
-	renderUploadDrawer();
-	runQueue();
+  const job = state.jobs.find((candidate) => candidate.id === jobId);
+  if (!job || job.status !== "failed") return;
+  job.status = "queued";
+  job.progress = "Queued";
+  job.error = "";
+  job.attempts = 0;
+  job.completedSteps = ["Queued"];
+  renderUploadPill();
+  renderUploadDrawer();
+  runQueue();
 }
 
 function dismissJob(jobId) {
-	state.jobs = state.jobs.filter((job) => job.id !== jobId);
-	renderUploadPill();
-	renderUploadDrawer();
+  state.jobs = state.jobs.filter((job) => job.id !== jobId);
+  renderUploadPill();
+  renderUploadDrawer();
 }
 
 function setUploadDrawerOpen(open) {
-	state.uploadDrawerOpen = open;
-	refs.uploadOverlay.classList.toggle("hidden", !open);
+  state.uploadDrawerOpen = open;
+  refs.uploadOverlay.classList.toggle("hidden", !open);
 }
 
 function renderUploadPill() {
-	const status = getOverallUploadStatus();
-	if (status === "idle") {
-		refs.uploadPill.classList.add("hidden");
-		refs.uploadPill.textContent = "";
-		return;
-	}
+  const status = getOverallUploadStatus();
+  if (status === "idle") {
+    refs.uploadPill.classList.add("hidden");
+    refs.uploadPill.textContent = "";
+    return;
+  }
 
-	refs.uploadPill.classList.remove("hidden");
-	refs.uploadPill.classList.remove("uploading", "completed", "error");
-	refs.uploadPill.classList.add(status);
+  refs.uploadPill.classList.remove("hidden");
+  refs.uploadPill.classList.remove("uploading", "completed", "error");
+  refs.uploadPill.classList.add(status);
 
-	const active = state.jobs.find(
-		(job) => job.status === "running" || job.status === "queued" || job.status === "retrying",
-	);
-	const failedCount = state.jobs.filter((job) => job.status === "failed").length;
-	const doneCount = state.jobs.filter((job) => job.status === "completed").length;
+  const active = state.jobs.find(
+    (job) =>
+      job.status === "running" ||
+      job.status === "queued" ||
+      job.status === "retrying",
+  );
+  const failedCount = state.jobs.filter(
+    (job) => job.status === "failed",
+  ).length;
+  const doneCount = state.jobs.filter(
+    (job) => job.status === "completed",
+  ).length;
 
-	if (status === "uploading") {
-		refs.uploadPill.textContent = `Uploading · ${active?.progress || "Processing"}`;
-	} else if (status === "error") {
-		refs.uploadPill.textContent = `Failed · ${failedCount} job${failedCount === 1 ? "" : "s"}`;
-	} else {
-		refs.uploadPill.textContent = `Uploaded · ${doneCount} job${doneCount === 1 ? "" : "s"}`;
-	}
+  if (status === "uploading") {
+    refs.uploadPill.textContent = `Uploading · ${active?.progress || "Processing"}`;
+  } else if (status === "error") {
+    refs.uploadPill.textContent = `Failed · ${failedCount} job${failedCount === 1 ? "" : "s"}`;
+  } else {
+    refs.uploadPill.textContent = `Uploaded · ${doneCount} job${doneCount === 1 ? "" : "s"}`;
+  }
 }
 
 function renderUploadDrawer() {
-	if (!state.jobs.length) {
-		refs.uploadJobs.innerHTML = `<p class="empty-note">No uploads in queue.</p>`;
-		refs.uploadClearDone.disabled = true;
-		return;
-	}
+  if (!state.jobs.length) {
+    refs.uploadJobs.innerHTML = `<p class="empty-note">No uploads in queue.</p>`;
+    refs.uploadClearDone.disabled = true;
+    return;
+  }
 
-	refs.uploadClearDone.disabled = !state.jobs.some(
-		(job) => job.status === "completed" || job.status === "failed",
-	);
+  refs.uploadClearDone.disabled = !state.jobs.some(
+    (job) => job.status === "completed" || job.status === "failed",
+  );
 
-	refs.uploadJobs.innerHTML = state.jobs
-		.map((job) => {
-			return `
+  refs.uploadJobs.innerHTML = state.jobs
+    .map((job) => {
+      return `
 				<article class="job-card ${job.status}">
 					<header>
 						<div>
@@ -1064,137 +1278,639 @@ function renderUploadDrawer() {
 
 					<div class="job-actions">
 						${
-							job.status === "failed"
-								? `<button class="ghost-btn job-retry" type="button" data-job-id="${escapeHtml(job.id)}">Retry</button>`
-								: ""
-						}
+              job.status === "failed"
+                ? `<button class="ghost-btn job-retry" type="button" data-job-id="${escapeHtml(job.id)}">Retry</button>`
+                : ""
+            }
 						${
-							job.status === "failed" || job.status === "completed"
-								? `<button class="ghost-btn job-dismiss" type="button" data-dismiss-id="${escapeHtml(job.id)}">Dismiss</button>`
-								: ""
-						}
+              job.status === "failed" || job.status === "completed"
+                ? `<button class="ghost-btn job-dismiss" type="button" data-dismiss-id="${escapeHtml(job.id)}">Dismiss</button>`
+                : ""
+            }
 					</div>
 				</article>
 			`;
-		})
-		.join("");
+    })
+    .join("");
 
-	refs.uploadJobs.querySelectorAll(".job-retry").forEach((button) => {
-		button.addEventListener("click", () => retryJob(button.dataset.jobId));
-	});
+  refs.uploadJobs.querySelectorAll(".job-retry").forEach((button) => {
+    button.addEventListener("click", () => retryJob(button.dataset.jobId));
+  });
 
-	refs.uploadJobs.querySelectorAll(".job-dismiss").forEach((button) => {
-		button.addEventListener("click", () => dismissJob(button.dataset.dismissId));
-	});
+  refs.uploadJobs.querySelectorAll(".job-dismiss").forEach((button) => {
+    button.addEventListener("click", () =>
+      dismissJob(button.dataset.dismissId),
+    );
+  });
 }
 
 function getOverallUploadStatus() {
-	if (!state.jobs.length) return "idle";
+  if (!state.jobs.length) return "idle";
 
-	const hasActive = state.jobs.some(
-		(job) => job.status === "queued" || job.status === "running" || job.status === "retrying",
-	);
-	if (hasActive) return "uploading";
+  const hasActive = state.jobs.some(
+    (job) =>
+      job.status === "queued" ||
+      job.status === "running" ||
+      job.status === "retrying",
+  );
+  if (hasActive) return "uploading";
 
-	const hasFailed = state.jobs.some((job) => job.status === "failed");
-	if (hasFailed) return "error";
-	return "completed";
+  const hasFailed = state.jobs.some((job) => job.status === "failed");
+  if (hasFailed) return "error";
+  return "completed";
 }
 
-function openReportReader(title, reportMarkdown) {
-	refs.readerTitle.textContent = title || "Report";
-	refs.readerContent.innerHTML = safeMarkdown(reportMarkdown || "No content available.");
-	refs.readerOverlay.classList.remove("hidden");
+function handleGlobalKeydown(event) {
+  if (event.key === "Escape") {
+    closeReportReader();
+    setUploadDrawerOpen(false);
+    return;
+  }
+
+  if (refs.readerOverlay.classList.contains("hidden")) return;
+  const key = event.key.toLowerCase();
+
+  if (key === "f") {
+    event.preventDefault();
+    toggleReaderFullscreen();
+    return;
+  }
+
+  if (readerState.mode !== "rsvp") return;
+
+  const targetTag = String(event.target?.tagName || "").toLowerCase();
+  const isEditable =
+    targetTag === "input" ||
+    targetTag === "textarea" ||
+    targetTag === "select" ||
+    Boolean(event.target?.isContentEditable);
+
+  if (isEditable && event.code !== "Space") return;
+
+  if (event.code === "Space") {
+    event.preventDefault();
+    toggleRsvpPlayback();
+    return;
+  }
+
+  if (key === "j") {
+    event.preventDefault();
+    shiftRsvpIndex(-10);
+    return;
+  }
+
+  if (key === "l") {
+    event.preventDefault();
+    shiftRsvpIndex(10);
+    return;
+  }
+
+  if (key === "arrowleft") {
+    event.preventDefault();
+    shiftRsvpIndex(-1);
+    return;
+  }
+
+  if (key === "arrowright") {
+    event.preventDefault();
+    shiftRsvpIndex(1);
+    return;
+  }
+
+  if (key === "a") {
+    event.preventDefault();
+    setRsvpWpm(readerState.wpm - 25);
+    return;
+  }
+
+  if (key === "d") {
+    event.preventDefault();
+    setRsvpWpm(readerState.wpm + 25);
+    return;
+  }
+
+  if (key === "c") {
+    event.preventDefault();
+    toggleRsvpContext();
+    return;
+  }
+
+  if (key === "r") {
+    event.preventDefault();
+    restartRsvpPlayback();
+  }
+}
+
+function openReportReader(title, reportMarkdown, preferredMode = null) {
+  const normalizedTitle = title || "Report";
+  const markdown = String(reportMarkdown || "No content available.");
+
+  readerState.title = normalizedTitle;
+  readerState.markdown = markdown;
+  readerState.plainText = markdownToPlainText(markdown);
+  readerState.tokens = tokenizeRsvpText(readerState.plainText);
+  readerState.index = 0;
+  readerState.elapsedMs = 0;
+  readerState.lastTickAt = 0;
+  stopRsvpPlayback();
+
+  refs.readerTitle.textContent = normalizedTitle;
+  refs.readerSubtitle.textContent = readerState.tokens.length
+    ? `${readerState.tokens.length} words ready for speed reading.`
+    : "No RSVP-readable text detected. Showing classic markdown mode.";
+  refs.readerContent.innerHTML = safeMarkdown(markdown);
+  refs.readerOverlay.classList.remove("hidden");
+  syncReaderFullscreenButton();
+
+  const requestedMode = preferredMode || readerState.mode;
+  setReaderMode(requestedMode);
+  renderRsvpFrame();
 }
 
 function closeReportReader() {
-	refs.readerOverlay.classList.add("hidden");
+  stopRsvpPlayback();
+  exitReaderFullscreenIfActive();
+  refs.readerOverlay.classList.add("hidden");
+  syncReaderFullscreenButton();
+}
+
+function isReaderInFullscreen() {
+  return document.fullscreenElement === refs.readerCard;
+}
+
+function syncReaderFullscreenButton() {
+  refs.readerFullscreen.textContent = isReaderInFullscreen()
+    ? "Exit Fullscreen"
+    : "Fullscreen";
+}
+
+async function toggleReaderFullscreen() {
+  if (!document.fullscreenEnabled || !refs.readerCard) return;
+
+  try {
+    if (isReaderInFullscreen()) {
+      await document.exitFullscreen();
+    } else {
+      await refs.readerCard.requestFullscreen();
+    }
+  } catch (_error) {
+    // Ignore fullscreen rejections due to browser permissions/user gesture constraints.
+  } finally {
+    syncReaderFullscreenButton();
+  }
+}
+
+function exitReaderFullscreenIfActive() {
+  if (!isReaderInFullscreen()) return;
+  document.exitFullscreen().catch(() => {});
+}
+
+function setReaderMode(mode) {
+  let nextMode = mode === "rsvp" ? "rsvp" : "markdown";
+  if (nextMode === "rsvp" && !readerState.tokens.length) {
+    nextMode = "markdown";
+  }
+
+  readerState.mode = nextMode;
+  localStorage.setItem("alfred-reader-mode", nextMode);
+
+  refs.readerModeMarkdown.classList.toggle(
+    "is-active",
+    nextMode === "markdown",
+  );
+  refs.readerModeRsvp.classList.toggle("is-active", nextMode === "rsvp");
+  refs.readerContent.classList.toggle("hidden", nextMode !== "markdown");
+  refs.rsvpView.classList.toggle("hidden", nextMode !== "rsvp");
+
+  if (nextMode !== "rsvp") {
+    pauseRsvpPlayback();
+    return;
+  }
+
+  renderRsvpFrame();
+}
+
+function toggleRsvpPlayback() {
+  if (readerState.running) {
+    pauseRsvpPlayback();
+    return;
+  }
+  startRsvpPlayback();
+}
+
+function startRsvpPlayback() {
+  if (!readerState.tokens.length) return;
+
+  if (readerState.index >= readerState.tokens.length - 1) {
+    readerState.index = 0;
+    readerState.elapsedMs = 0;
+  }
+
+  readerState.running = true;
+  readerState.lastTickAt = Date.now();
+  renderRsvpFrame();
+  scheduleRsvpTick();
+}
+
+function pauseRsvpPlayback() {
+  if (readerState.running && readerState.lastTickAt) {
+    readerState.elapsedMs += Date.now() - readerState.lastTickAt;
+  }
+
+  readerState.running = false;
+  readerState.lastTickAt = 0;
+  clearRsvpTimer();
+  renderRsvpFrame();
+}
+
+function stopRsvpPlayback() {
+  readerState.running = false;
+  readerState.lastTickAt = 0;
+  clearRsvpTimer();
+}
+
+function restartRsvpPlayback() {
+  const wasRunning = readerState.running;
+  stopRsvpPlayback();
+  readerState.index = 0;
+  readerState.elapsedMs = 0;
+  renderRsvpFrame();
+  if (wasRunning) startRsvpPlayback();
+}
+
+function shiftRsvpIndex(delta) {
+  if (!readerState.tokens.length) return;
+
+  const wasRunning = readerState.running;
+  if (wasRunning) pauseRsvpPlayback();
+
+  readerState.index = clampNumber(
+    readerState.index + delta,
+    0,
+    readerState.tokens.length - 1,
+  );
+  renderRsvpFrame();
+
+  if (wasRunning) startRsvpPlayback();
+}
+
+function setRsvpWpm(value) {
+  const clampedWpm = clampNumber(
+    Math.round(Number(value) || DEFAULT_RSVP_WPM),
+    MIN_RSVP_WPM,
+    MAX_RSVP_WPM,
+  );
+  readerState.wpm = clampedWpm;
+  localStorage.setItem("alfred-rsvp-wpm", String(clampedWpm));
+
+  refs.rsvpWpm.value = String(clampedWpm);
+  refs.rsvpWpmValue.textContent = String(clampedWpm);
+
+  if (readerState.running) {
+    if (readerState.lastTickAt) {
+      readerState.elapsedMs += Date.now() - readerState.lastTickAt;
+    }
+    readerState.lastTickAt = Date.now();
+    scheduleRsvpTick();
+  }
+
+  renderRsvpFrame();
+}
+
+function toggleRsvpContext() {
+  readerState.contextVisible = !readerState.contextVisible;
+  localStorage.setItem(
+    "alfred-rsvp-context",
+    readerState.contextVisible ? "1" : "0",
+  );
+  renderRsvpFrame();
+}
+
+function scheduleRsvpTick() {
+  clearRsvpTimer();
+  if (!readerState.running || !readerState.tokens.length) return;
+
+  const currentWord = readerState.tokens[readerState.index] || "";
+  const delay = getWordDurationMs(currentWord, readerState.wpm);
+
+  readerState.timerId = window.setTimeout(() => {
+    if (!readerState.running) return;
+
+    if (readerState.lastTickAt) {
+      readerState.elapsedMs += Date.now() - readerState.lastTickAt;
+    }
+
+    if (readerState.index >= readerState.tokens.length - 1) {
+      readerState.running = false;
+      readerState.lastTickAt = 0;
+      clearRsvpTimer();
+      renderRsvpFrame();
+      return;
+    }
+
+    readerState.index += 1;
+    readerState.lastTickAt = Date.now();
+    renderRsvpFrame();
+    scheduleRsvpTick();
+  }, delay);
+}
+
+function renderRsvpFrame() {
+  if (!refs.rsvpView) return;
+
+  const total = readerState.tokens.length;
+  const hasWords = total > 0;
+
+  refs.rsvpWpm.value = String(readerState.wpm);
+  refs.rsvpWpmValue.textContent = String(readerState.wpm);
+  refs.rsvpPlay.disabled = !hasWords;
+  refs.rsvpRestart.disabled = !hasWords;
+  refs.rsvpContextToggle.disabled = !hasWords;
+
+  if (!hasWords) {
+    refs.rsvpLeft.textContent = "";
+    refs.rsvpOrp.textContent = "No";
+    refs.rsvpRight.textContent = " content";
+    refs.rsvpProgressFill.style.width = "0%";
+    refs.rsvpProgressLabel.textContent = "0 / 0 words";
+    refs.rsvpTimeLabel.textContent = "Elapsed 0:00 · Left 0:00";
+    refs.rsvpContext.classList.add("hidden");
+    refs.rsvpContextToggle.textContent = "No Context";
+    refs.rsvpBack10.disabled = true;
+    refs.rsvpBack1.disabled = true;
+    refs.rsvpForward1.disabled = true;
+    refs.rsvpForward10.disabled = true;
+    refs.rsvpPlay.textContent = "Play";
+    return;
+  }
+
+  readerState.index = clampNumber(readerState.index, 0, total - 1);
+  const token = readerState.tokens[readerState.index] || "";
+  const parts = splitWordForOrp(token);
+
+  refs.rsvpLeft.textContent = parts.left;
+  refs.rsvpOrp.textContent = parts.orp || " ";
+  refs.rsvpRight.textContent = parts.right;
+
+  const progress = ((readerState.index + 1) / total) * 100;
+  refs.rsvpProgressFill.style.width = `${progress.toFixed(2)}%`;
+  refs.rsvpProgressLabel.textContent = `${readerState.index + 1} / ${total} words · ${Math.round(progress)}%`;
+
+  const elapsedMs =
+    readerState.elapsedMs +
+    (readerState.running && readerState.lastTickAt
+      ? Date.now() - readerState.lastTickAt
+      : 0);
+  const remainingWords = Math.max(0, total - (readerState.index + 1));
+  const estimatedLeftMs =
+    (remainingWords * 60000) / Math.max(readerState.wpm, 1);
+  refs.rsvpTimeLabel.textContent = `Elapsed ${formatDurationClock(elapsedMs)} · Left ${formatDurationClock(estimatedLeftMs)}`;
+
+  refs.rsvpBack10.disabled = readerState.index === 0;
+  refs.rsvpBack1.disabled = readerState.index === 0;
+  refs.rsvpForward1.disabled = readerState.index >= total - 1;
+  refs.rsvpForward10.disabled = readerState.index >= total - 1;
+  refs.rsvpPlay.textContent = readerState.running
+    ? "Pause"
+    : readerState.index >= total - 1
+      ? "Replay"
+      : "Play";
+
+  refs.rsvpContextToggle.textContent = readerState.contextVisible
+    ? "Hide Context"
+    : "Show Context";
+  refs.rsvpContext.classList.toggle("hidden", !readerState.contextVisible);
+  if (readerState.contextVisible) {
+    refs.rsvpContext.innerHTML = buildRsvpContextLine(
+      readerState.tokens,
+      readerState.index,
+    );
+  }
+}
+
+function splitWordForOrp(token) {
+  const source = String(token || "");
+  if (!source) return { left: "", orp: "", right: "" };
+
+  const coreMatch = source.match(
+    /^([^A-Za-z0-9]*)([A-Za-z0-9][A-Za-z0-9'’-]*)([^A-Za-z0-9]*)$/,
+  );
+  if (!coreMatch) {
+    const chars = [...source];
+    const index = clampNumber(
+      getOrpIndex(chars.length),
+      0,
+      Math.max(chars.length - 1, 0),
+    );
+    return {
+      left: chars.slice(0, index).join(""),
+      orp: chars[index] || "",
+      right: chars.slice(index + 1).join(""),
+    };
+  }
+
+  const [, prefix, core, suffix] = coreMatch;
+  const chars = [...core];
+  const index = clampNumber(
+    getOrpIndex(chars.length),
+    0,
+    Math.max(chars.length - 1, 0),
+  );
+
+  return {
+    left: `${prefix}${chars.slice(0, index).join("")}`,
+    orp: chars[index] || "",
+    right: `${chars.slice(index + 1).join("")}${suffix}`,
+  };
+}
+
+function getOrpIndex(length) {
+  if (length <= 0) return 0;
+  return Math.min(3, Math.floor((length - 1) / 3));
+}
+
+function getWordDurationMs(word, baseWpm) {
+  const safeWpm = clampNumber(
+    baseWpm || DEFAULT_RSVP_WPM,
+    MIN_RSVP_WPM,
+    MAX_RSVP_WPM,
+  );
+  const baseDuration = 60000 / safeWpm;
+  const source = String(word || "");
+  const core = source.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "");
+
+  let multiplier = 1;
+  if (core.length > 8) multiplier += 0.3;
+  if (core.length > 12) multiplier += 0.2;
+  if (/[.!?]["')\]]?$/.test(source)) multiplier += 0.8;
+  if (/[,;:]["')\]]?$/.test(source)) multiplier += 0.4;
+  if (/^[A-Z]/.test(core) && core.length > 1) multiplier += 0.1;
+
+  return clampNumber(Math.round(baseDuration * multiplier), 60, 2400);
+}
+
+function tokenizeRsvpText(text) {
+  return (
+    String(text || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .match(/[^\s]+/g) || []
+  );
+}
+
+function markdownToPlainText(markdown) {
+  const template = document.createElement("template");
+  template.innerHTML = safeMarkdown(markdown || "");
+  return String(template.content.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildRsvpContextLine(tokens, index) {
+  const start = Math.max(0, index - RSVP_CONTEXT_RADIUS);
+  const end = Math.min(tokens.length, index + RSVP_CONTEXT_RADIUS + 1);
+
+  return tokens
+    .slice(start, end)
+    .map((token, offset) => {
+      const absoluteIndex = start + offset;
+      if (absoluteIndex === index) {
+        return `<mark>${escapeHtml(token)}</mark>`;
+      }
+      return escapeHtml(token);
+    })
+    .join(" ");
+}
+
+function loadReaderModePreference() {
+  return localStorage.getItem("alfred-reader-mode") === "rsvp"
+    ? "rsvp"
+    : "markdown";
+}
+
+function loadRsvpWpmPreference() {
+  const saved = Number(localStorage.getItem("alfred-rsvp-wpm"));
+  if (!Number.isFinite(saved)) return DEFAULT_RSVP_WPM;
+  return clampNumber(saved, MIN_RSVP_WPM, MAX_RSVP_WPM);
+}
+
+function loadRsvpContextPreference() {
+  return localStorage.getItem("alfred-rsvp-context") !== "0";
+}
+
+function clearRsvpTimer() {
+  if (!readerState.timerId) return;
+  window.clearTimeout(readerState.timerId);
+  readerState.timerId = null;
+}
+
+function formatDurationClock(ms) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function safeMarkdown(markdown) {
-	const raw = marked.parse(markdown || "");
-	return sanitizeHtml(raw);
+  const raw = marked.parse(markdown || "");
+  return sanitizeHtml(raw);
 }
 
 function sanitizeHtml(html) {
-	const template = document.createElement("template");
-	template.innerHTML = String(html || "");
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
 
-	const blockedTags = ["script", "style", "iframe", "object", "embed", "link", "meta"];
-	blockedTags.forEach((tagName) => {
-		template.content.querySelectorAll(tagName).forEach((node) => node.remove());
-	});
+  const blockedTags = [
+    "script",
+    "style",
+    "iframe",
+    "object",
+    "embed",
+    "link",
+    "meta",
+  ];
+  blockedTags.forEach((tagName) => {
+    template.content.querySelectorAll(tagName).forEach((node) => node.remove());
+  });
 
-	template.content.querySelectorAll("*").forEach((element) => {
-		[...element.attributes].forEach((attribute) => {
-			const name = attribute.name.toLowerCase();
-			const value = String(attribute.value || "");
-			if (name.startsWith("on")) element.removeAttribute(attribute.name);
-			if (name === "srcdoc") element.removeAttribute(attribute.name);
-			if ((name === "href" || name === "src") && /^\s*javascript:/i.test(value)) {
-				element.removeAttribute(attribute.name);
-			}
-		});
-	});
+  template.content.querySelectorAll("*").forEach((element) => {
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      const value = String(attribute.value || "");
+      if (name.startsWith("on")) element.removeAttribute(attribute.name);
+      if (name === "srcdoc") element.removeAttribute(attribute.name);
+      if (
+        (name === "href" || name === "src") &&
+        /^\s*javascript:/i.test(value)
+      ) {
+        element.removeAttribute(attribute.name);
+      }
+    });
+  });
 
-	return template.innerHTML;
+  return template.innerHTML;
 }
 
 function escapeHtml(value) {
-	const div = document.createElement("div");
-	div.textContent = String(value ?? "");
-	return div.innerHTML;
+  const div = document.createElement("div");
+  div.textContent = String(value ?? "");
+  return div.innerHTML;
 }
 
 function toErrorMessage(error) {
-	if (error instanceof Error) return error.message;
-	return String(error || "Unknown error");
+  if (error instanceof Error) return error.message;
+  return String(error || "Unknown error");
 }
 
 function nextId() {
-	idCounter += 1;
-	return `job-${Date.now()}-${idCounter}`;
+  idCounter += 1;
+  return `job-${Date.now()}-${idCounter}`;
 }
 
 function formatDate(value) {
-	const parsed = new Date(value);
-	if (Number.isNaN(parsed.getTime())) return "Invalid date";
-	return parsed.toLocaleDateString("en-US", {
-		year: "numeric",
-		month: "short",
-		day: "numeric",
-	});
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Invalid date";
+  return parsed.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function timeAgo(timestamp) {
-	const deltaSeconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
-	if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
-	if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
-	if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
-	return `${Math.floor(deltaSeconds / 86400)}d ago`;
+  const deltaSeconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
+  if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
+  return `${Math.floor(deltaSeconds / 86400)}d ago`;
 }
 
 function sleep(ms) {
-	return new Promise((resolve) => {
-		setTimeout(resolve, ms);
-	});
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function fileToBase64(file) {
-	return new Promise((resolve, reject) => {
-		const reader = new FileReader();
-		reader.onload = () => {
-			const value = String(reader.result || "");
-			const parts = value.split(",");
-			if (parts.length < 2) {
-				reject(new Error("Failed to read file as base64"));
-				return;
-			}
-			resolve(parts[1]);
-		};
-		reader.onerror = () => {
-			reject(new Error("Failed to read selected file"));
-		};
-		reader.readAsDataURL(file);
-	});
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result || "");
+      const parts = value.split(",");
+      if (parts.length < 2) {
+        reject(new Error("Failed to read file as base64"));
+        return;
+      }
+      resolve(parts[1]);
+    };
+    reader.onerror = () => {
+      reject(new Error("Failed to read selected file"));
+    };
+    reader.readAsDataURL(file);
+  });
 }
