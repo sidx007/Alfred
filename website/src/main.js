@@ -121,15 +121,28 @@ function normalizeActivityHeatmap(activity) {
     return getDefaultActivityHeatmap();
   }
 
+  const cells = candidate.cells;
+  const derivedWeekColumns = Math.max(1, Math.ceil(cells.length / 7));
+  const rawWeekColumns = Number(candidate.weekColumns || 0);
+  const weekColumns =
+    Number.isFinite(rawWeekColumns) &&
+    rawWeekColumns >= 1 &&
+    rawWeekColumns <= Math.max(12, derivedWeekColumns + 2)
+      ? Math.round(rawWeekColumns)
+      : derivedWeekColumns;
+
   return {
     year: Number(candidate.year || new Date().getFullYear()),
     totalDays,
     activeDays: Number(candidate.activeDays || 0),
-    weekColumns: Number(candidate.weekColumns || 53),
+    weekColumns,
     monthLabels: Array.isArray(candidate.monthLabels)
-      ? candidate.monthLabels
+      ? candidate.monthLabels.filter((monthLabel) => {
+          const column = Number(monthLabel?.column);
+          return Number.isFinite(column) && column >= 0 && column < weekColumns;
+        })
       : [],
-    cells: candidate.cells,
+    cells,
   };
 }
 
@@ -685,14 +698,25 @@ function renderActivityOverview() {
   const totalDays = Number(heatmap.totalDays || 30);
   const activeDays = Number(heatmap.activeDays || 0);
   const cells = Array.isArray(heatmap.cells) ? heatmap.cells : [];
-  const weekColumns = Math.max(
-    1,
-    Number(heatmap.weekColumns || Math.ceil(cells.length / 7) || 53),
-  );
+  const derivedWeekColumns = Math.max(1, Math.ceil(cells.length / 7));
+  const rawWeekColumns = Number(heatmap.weekColumns || 0);
+  const weekColumns =
+    Number.isFinite(rawWeekColumns) &&
+    rawWeekColumns >= 1 &&
+    rawWeekColumns <= Math.max(12, derivedWeekColumns + 2)
+      ? Math.round(rawWeekColumns)
+      : derivedWeekColumns;
   const monthLabels = Array.isArray(heatmap.monthLabels)
-    ? heatmap.monthLabels
+    ? heatmap.monthLabels.filter((monthLabel) => {
+        const column = Number(monthLabel?.column);
+        return Number.isFinite(column) && column >= 0 && column < weekColumns;
+      })
     : [];
   const percent = totalDays > 0 ? Math.round((activeDays / totalDays) * 100) : 0;
+  const emptyHeatmapCopy =
+    activeDays > 0
+      ? `${activeDays} focused days logged in this 30-day window.`
+      : "No activity yet. Upload notes or chat today to light up your first square.";
 
   refs.activityOverview.innerHTML = `
     <article class="activity-card">
@@ -724,43 +748,53 @@ function renderActivityOverview() {
       </div>
 
       <button id="activity-heatmap-toggle" class="activity-heatmap-toggle" type="button" aria-expanded="${state.activityExpanded}">
-        ${
-          monthLabels.length
-            ? `<div class="activity-month-labels" style="--week-columns:${weekColumns}">
-                ${monthLabels
-                  .map((monthLabel) => {
-                    const column = Math.max(1, Number(monthLabel.column || 0) + 1);
-                    const label = escapeHtml(String(monthLabel.label || ""));
-                    return `<span class="activity-month-label" style="grid-column:${column}">${label}</span>`;
-                  })
-                  .join("")}
-              </div>`
-            : ""
-        }
+        <div class="activity-heatmap-shell">
+          ${
+            monthLabels.length
+              ? `<div class="activity-month-labels" style="--week-columns:${weekColumns}">
+                  ${monthLabels
+                    .map((monthLabel) => {
+                      const column = Math.max(1, Number(monthLabel.column || 0) + 1);
+                      const label = escapeHtml(String(monthLabel.label || ""));
+                      return `<span class="activity-month-label" style="grid-column:${column}">${label}</span>`;
+                    })
+                    .join("")}
+                </div>`
+              : ""
+          }
 
-        <div class="activity-heatmap-grid" style="--week-columns:${weekColumns}" role="img" aria-label="Activity heatmap for the last 30 days">
-          ${cells
-            .map((cell) => {
-              if (!cell?.date) {
-                return `<span class="activity-cell is-empty" aria-hidden="true"></span>`;
-              }
-              const cellClass = cell.active
-                ? "is-active"
-                : cell.future
-                  ? "is-future"
-                  : "is-idle";
-              const title = `${cell.date} - ${
-                cell.active
-                  ? "Active"
+          <div class="activity-heatmap-grid" style="--week-columns:${weekColumns}" role="img" aria-label="Activity heatmap for the last 30 days">
+            ${cells
+              .map((cell) => {
+                if (!cell?.date) {
+                  return `<span class="activity-cell is-empty" aria-hidden="true"></span>`;
+                }
+                const cellClass = cell.active
+                  ? "is-active"
                   : cell.future
-                    ? "Upcoming day"
-                    : "No activity"
-              }`;
-              return `<span class="activity-cell ${cellClass}" title="${title}"></span>`;
-            })
-            .join("")}
+                    ? "is-future"
+                    : "is-idle";
+                const title = `${cell.date} - ${
+                  cell.active
+                    ? "Active"
+                    : cell.future
+                      ? "Upcoming day"
+                      : "No activity"
+                }`;
+                return `<span class="activity-cell ${cellClass}" title="${title}"></span>`;
+              })
+              .join("")}
+          </div>
+
+          <div class="activity-legend" aria-hidden="true">
+            <span class="activity-legend-item"><i class="activity-legend-swatch is-idle"></i>Idle</span>
+            <span class="activity-legend-item"><i class="activity-legend-swatch is-active"></i>Active</span>
+            <span class="activity-legend-item"><i class="activity-legend-swatch is-future"></i>Future</span>
+          </div>
         </div>
       </button>
+
+      <p class="activity-empty-copy">${escapeHtml(emptyHeatmapCopy)}</p>
 
       <p class="activity-hint">Click the heatmap to ${
         state.activityExpanded ? "hide" : "reveal"
