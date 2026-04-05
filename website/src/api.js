@@ -35,6 +35,39 @@ export async function fetchTopicCounts() {
   return data.counts || {};
 }
 
+export async function fetchActivitySummary() {
+  const data = await request("/activity");
+  const heatmap = data.heatmap;
+  const isRecentHeatmap =
+    heatmap &&
+    Array.isArray(heatmap.cells) &&
+    Number(heatmap.totalDays || 0) > 0 &&
+    Number(heatmap.totalDays || 0) <= 45;
+
+  return {
+    heatmap: isRecentHeatmap
+      ? heatmap
+      : {
+      year: new Date().getFullYear(),
+      totalDays: 30,
+      activeDays: 0,
+      weekColumns: 5,
+      monthLabels: [],
+      cells: [],
+      },
+    year: data.year || {
+      year: new Date().getFullYear(),
+      activeDays: 0,
+      currentStreak: 0,
+      longestStreak: 0,
+      bestMonth: "Jan",
+      bestMonthActiveDays: 0,
+      todayActive: false,
+      monthlyCounts: Array.from({ length: 12 }, () => 0),
+    },
+  };
+}
+
 export async function sendChatMessage(message) {
   const data = await request("/chat", {
     method: "POST",

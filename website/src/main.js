@@ -1,5 +1,6 @@
 import { marked } from "marked";
 import {
+  fetchActivitySummary,
     fetchChecklistItems,
     fetchDailyReportTasks,
     fetchFlashcards,
@@ -26,6 +27,8 @@ const DEFAULT_RSVP_WPM = 320;
 const MIN_RSVP_WPM = 120;
 const MAX_RSVP_WPM = 900;
 const RSVP_CONTEXT_RADIUS = 8;
+const MAX_PDF_PAGES = 120;
+const MAX_PDF_TEXT_CHARS = 400000;
 
 const readerState = {
   title: "",
@@ -55,6 +58,25 @@ const state = {
   flashcardsStatus: "No flashcards generated for today yet.",
   chatMessages: [],
   chatLoading: false,
+  activityHeatmap: {
+    year: new Date().getFullYear(),
+    totalDays: 30,
+    activeDays: 0,
+    weekColumns: 5,
+    monthLabels: [],
+    cells: [],
+  },
+  activityYear: {
+    year: new Date().getFullYear(),
+    activeDays: 0,
+    currentStreak: 0,
+    longestStreak: 0,
+    bestMonth: "Jan",
+    bestMonthActiveDays: 0,
+    todayActive: false,
+    monthlyCounts: Array.from({ length: 12 }, () => 0),
+  },
+  activityExpanded: true,
   selectedTopics: new Set(),
   customLoading: false,
   customReport: "",
@@ -64,13 +86,79 @@ const state = {
   uploadDrawerOpen: false,
 };
 
+function getDefaultActivityHeatmap() {
+  return {
+    year: new Date().getFullYear(),
+    totalDays: 30,
+    activeDays: 0,
+    weekColumns: 5,
+    monthLabels: [],
+    cells: [],
+  };
+}
+
+function getDefaultActivityYear() {
+  return {
+    year: new Date().getFullYear(),
+    activeDays: 0,
+    currentStreak: 0,
+    longestStreak: 0,
+    bestMonth: "Jan",
+    bestMonthActiveDays: 0,
+    todayActive: false,
+    monthlyCounts: Array.from({ length: 12 }, () => 0),
+  };
+}
+
+function normalizeActivityHeatmap(activity) {
+  const candidate = activity?.heatmap;
+  if (!candidate || !Array.isArray(candidate.cells)) {
+    return getDefaultActivityHeatmap();
+  }
+
+  const totalDays = Number(candidate.totalDays || 0);
+  if (totalDays < 1 || totalDays > 45) {
+    return getDefaultActivityHeatmap();
+  }
+
+  return {
+    year: Number(candidate.year || new Date().getFullYear()),
+    totalDays,
+    activeDays: Number(candidate.activeDays || 0),
+    weekColumns: Number(candidate.weekColumns || 53),
+    monthLabels: Array.isArray(candidate.monthLabels)
+      ? candidate.monthLabels
+      : [],
+    cells: candidate.cells,
+  };
+}
+
+function normalizeActivityYear(activity) {
+  const candidate = activity?.year;
+  if (!candidate) return getDefaultActivityYear();
+
+  return {
+    year: Number(candidate.year || new Date().getFullYear()),
+    activeDays: Number(candidate.activeDays || 0),
+    currentStreak: Number(candidate.currentStreak || 0),
+    longestStreak: Number(candidate.longestStreak || 0),
+    bestMonth: String(candidate.bestMonth || "Jan"),
+    bestMonthActiveDays: Number(candidate.bestMonthActiveDays || 0),
+    todayActive: Boolean(candidate.todayActive),
+    monthlyCounts: Array.isArray(candidate.monthlyCounts)
+      ? candidate.monthlyCounts
+      : Array.from({ length: 12 }, () => 0),
+  };
+}
+
 const reportCache = new Map();
 let refs = {};
 let idCounter = 0;
+let hasBooted = false;
 
-boot();
-
-async function boot() {
+export async function boot() {
+  if (hasBooted) return;
+  hasBooted = true;
   renderShell();
   readerState.wpm = loadRsvpWpmPreference();
   readerState.contextVisible = loadRsvpContextPreference();
@@ -104,29 +192,25 @@ function renderShell() {
 					<div class="panel-head">
 						<div>
 							<h2>Capture Desk</h2>
-							<p>Upload text, audio, or images to run the same processing pipeline as the app.</p>
+              <p>Paste notes or upload a PDF. PDF text is extracted locally and sent through the same text processing pipeline.</p>
 						</div>
 					</div>
+
+          <section id="activity-overview" class="activity-overview"></section>
 
 					<div class="home-stats" id="home-stats"></div>
 
 					<div class="home-grid">
 						<article class="tile tile-text">
 							<h3>Text Capture</h3>
-							<textarea id="text-capture" placeholder="Paste notes, ideas, or transcript text..."></textarea>
-							<button id="text-submit" class="primary-btn" type="button">Process Text</button>
-						</article>
-
-						<article class="tile tile-audio">
-							<h3>Audio Capture</h3>
-							<input id="audio-file" class="file-input" type="file" accept="audio/*" />
-							<button id="audio-submit" class="primary-btn" type="button">Process Audio</button>
-						</article>
-
-						<article class="tile tile-image">
-							<h3>Image Capture</h3>
-							<input id="image-file" class="file-input" type="file" accept="image/*" multiple />
-							<button id="image-submit" class="primary-btn" type="button">Process Images</button>
+              <div class="capture-entry-unified">
+                <textarea id="text-capture" placeholder="Paste notes, ideas, or transcript text..."></textarea>
+                <div class="capture-side-actions">
+                  <button id="pdf-upload-trigger" class="ghost-btn" type="button">Upload PDF</button>
+                  <button id="text-submit" class="primary-btn" type="button">Process Text</button>
+                </div>
+              </div>
+              <input id="pdf-file" class="capture-file-input-hidden" type="file" accept="application/pdf,.pdf" />
 						</article>
 
 						<article class="tile tile-topics">
@@ -296,13 +380,12 @@ function renderShell() {
     dockButtons: Array.from(document.querySelectorAll(".dock-btn")),
     themeToggle: document.getElementById("theme-toggle"),
     uploadPill: document.getElementById("upload-pill"),
+    activityOverview: document.getElementById("activity-overview"),
     homeStats: document.getElementById("home-stats"),
     textCapture: document.getElementById("text-capture"),
     textSubmit: document.getElementById("text-submit"),
-    audioFile: document.getElementById("audio-file"),
-    audioSubmit: document.getElementById("audio-submit"),
-    imageFile: document.getElementById("image-file"),
-    imageSubmit: document.getElementById("image-submit"),
+    pdfUploadTrigger: document.getElementById("pdf-upload-trigger"),
+    pdfFile: document.getElementById("pdf-file"),
     topicCloud: document.getElementById("topic-cloud"),
     dailyReportList: document.getElementById("daily-report-list"),
     chatLog: document.getElementById("chat-log"),
@@ -364,8 +447,10 @@ function bindEvents() {
   refs.themeToggle.addEventListener("click", toggleTheme);
 
   refs.textSubmit.addEventListener("click", handleTextUpload);
-  refs.audioSubmit.addEventListener("click", handleAudioUpload);
-  refs.imageSubmit.addEventListener("click", handleImageUpload);
+  refs.pdfUploadTrigger.addEventListener("click", () => {
+    refs.pdfFile.click();
+  });
+  refs.pdfFile.addEventListener("change", handlePdfUpload);
 
   refs.chatSend.addEventListener("click", handleChatSend);
   refs.chatInput.addEventListener("keydown", (event) => {
@@ -450,6 +535,7 @@ async function hydrateData() {
     fetchDailyReportTasks(),
     fetchChecklistItems(),
     fetchFlashcards(),
+    fetchActivitySummary(),
   ]);
 
   if (results[0].status === "fulfilled") {
@@ -501,10 +587,21 @@ async function hydrateData() {
     state.flashcardsStatus = "Could not load today's flashcards.";
   }
 
+  if (results[5].status === "fulfilled") {
+    const activity = results[5].value || {};
+    state.activityHeatmap = normalizeActivityHeatmap(activity);
+    state.activityYear = normalizeActivityYear(activity);
+  } else {
+    console.error("Failed to load activity summary:", results[5].reason);
+    state.activityHeatmap = getDefaultActivityHeatmap();
+    state.activityYear = getDefaultActivityYear();
+  }
+
   state.flashcardRevealed = false;
 }
 
 function renderAll() {
+  renderActivityOverview();
   renderHomeStats();
   renderTopicCloud();
   renderDailyReports();
@@ -563,6 +660,154 @@ function renderHomeStats() {
 			<p>${flashcardCount}</p>
 		</article>
 	`;
+}
+
+function renderActivityOverview() {
+  const heatmap = state.activityHeatmap || {
+    year: new Date().getFullYear(),
+    totalDays: 30,
+    activeDays: 0,
+    weekColumns: 5,
+    monthLabels: [],
+    cells: [],
+  };
+  const year = state.activityYear || {
+    year: new Date().getFullYear(),
+    activeDays: 0,
+    currentStreak: 0,
+    longestStreak: 0,
+    bestMonth: "Jan",
+    bestMonthActiveDays: 0,
+    todayActive: false,
+    monthlyCounts: Array.from({ length: 12 }, () => 0),
+  };
+
+  const totalDays = Number(heatmap.totalDays || 30);
+  const activeDays = Number(heatmap.activeDays || 0);
+  const cells = Array.isArray(heatmap.cells) ? heatmap.cells : [];
+  const weekColumns = Math.max(
+    1,
+    Number(heatmap.weekColumns || Math.ceil(cells.length / 7) || 53),
+  );
+  const monthLabels = Array.isArray(heatmap.monthLabels)
+    ? heatmap.monthLabels
+    : [];
+  const percent = totalDays > 0 ? Math.round((activeDays / totalDays) * 100) : 0;
+
+  refs.activityOverview.innerHTML = `
+    <article class="activity-card">
+      <header class="activity-card-head">
+        <div>
+          <h3>Monthly Momentum</h3>
+          <p>${activeDays}/${totalDays} active days in the last 30 days</p>
+        </div>
+        <span class="activity-pill">${percent}%</span>
+      </header>
+
+      <div class="activity-metric-strip">
+        <article class="activity-metric">
+          <h4>${Number(year.currentStreak || 0)}</h4>
+          <p>Current streak</p>
+        </article>
+        <article class="activity-metric">
+          <h4>${Number(year.longestStreak || 0)}</h4>
+          <p>Longest streak</p>
+        </article>
+        <article class="activity-metric">
+          <h4>${Number(year.bestMonthActiveDays || 0)}</h4>
+          <p>Best month: ${escapeHtml(String(year.bestMonth || "Jan"))}</p>
+        </article>
+        <article class="activity-metric">
+          <h4>${year.todayActive ? "Yes" : "No"}</h4>
+          <p>Active today</p>
+        </article>
+      </div>
+
+      <button id="activity-heatmap-toggle" class="activity-heatmap-toggle" type="button" aria-expanded="${state.activityExpanded}">
+        ${
+          monthLabels.length
+            ? `<div class="activity-month-labels" style="--week-columns:${weekColumns}">
+                ${monthLabels
+                  .map((monthLabel) => {
+                    const column = Math.max(1, Number(monthLabel.column || 0) + 1);
+                    const label = escapeHtml(String(monthLabel.label || ""));
+                    return `<span class="activity-month-label" style="grid-column:${column}">${label}</span>`;
+                  })
+                  .join("")}
+              </div>`
+            : ""
+        }
+
+        <div class="activity-heatmap-grid" style="--week-columns:${weekColumns}" role="img" aria-label="Activity heatmap for the last 30 days">
+          ${cells
+            .map((cell) => {
+              if (!cell?.date) {
+                return `<span class="activity-cell is-empty" aria-hidden="true"></span>`;
+              }
+              const cellClass = cell.active
+                ? "is-active"
+                : cell.future
+                  ? "is-future"
+                  : "is-idle";
+              const title = `${cell.date} - ${
+                cell.active
+                  ? "Active"
+                  : cell.future
+                    ? "Upcoming day"
+                    : "No activity"
+              }`;
+              return `<span class="activity-cell ${cellClass}" title="${title}"></span>`;
+            })
+            .join("")}
+        </div>
+      </button>
+
+      <p class="activity-hint">Click the heatmap to ${
+        state.activityExpanded ? "hide" : "reveal"
+      } detailed yearly streak stats</p>
+
+      ${
+        state.activityExpanded
+          ? `<div class="activity-streak-grid">
+              <article class="activity-streak-item">
+                <h4>${Number(year.currentStreak || 0)}</h4>
+                <p>Current streak</p>
+              </article>
+              <article class="activity-streak-item">
+                <h4>${Number(year.longestStreak || 0)}</h4>
+                <p>Best streak in ${Number(year.year || new Date().getFullYear())}</p>
+              </article>
+              <article class="activity-streak-item">
+                <h4>${Number(year.activeDays || 0)}</h4>
+                <p>Active days this year</p>
+              </article>
+              <article class="activity-streak-item">
+                <h4>${escapeHtml(String(year.bestMonth || "Jan"))}</h4>
+                <p>Most active month</p>
+              </article>
+              <article class="activity-streak-item">
+                <h4>${Number(year.bestMonthActiveDays || 0)}</h4>
+                <p>Days active in best month</p>
+              </article>
+              <article class="activity-streak-item">
+                <h4>${year.todayActive ? "On track" : "Start now"}</h4>
+                <p>Today status</p>
+              </article>
+            </div>`
+          : ""
+      }
+    </article>
+  `;
+
+  const toggleButton = refs.activityOverview.querySelector(
+    "#activity-heatmap-toggle",
+  );
+  if (toggleButton) {
+    toggleButton.addEventListener("click", () => {
+      state.activityExpanded = !state.activityExpanded;
+      renderActivityOverview();
+    });
+  }
 }
 
 function renderTopicCloud() {
@@ -980,48 +1225,33 @@ async function handleTextUpload() {
   enqueueJob("text", "Text note", { type: "text", text, language: "en" });
 }
 
-async function handleAudioUpload() {
-  const file = refs.audioFile.files?.[0];
+async function handlePdfUpload() {
+  const file = refs.pdfFile.files?.[0];
   if (!file) return;
 
-  try {
-    const audioBase64 = await fileToBase64(file);
-    enqueueJob("audio", file.name || "Audio note", {
-      type: "audio",
-      audioBase64,
-      contentType: file.type || "audio/m4a",
-      language: "en",
-    });
-    refs.audioFile.value = "";
-  } catch (error) {
-    enqueueErrorJob("audio", file.name || "Audio note", toErrorMessage(error));
-  }
-}
-
-async function handleImageUpload() {
-  const files = Array.from(refs.imageFile.files || []);
-  if (!files.length) return;
+  const originalLabel = refs.pdfUploadTrigger.textContent;
+  refs.pdfUploadTrigger.disabled = true;
+  refs.pdfUploadTrigger.textContent = "Extracting...";
 
   try {
-    const imagesBase64 = await Promise.all(
-      files.map((file) => fileToBase64(file)),
-    );
+    const extraction = await extractTextFromPdfFile(file);
+    const pageLabel = `${extraction.extractedPages} page${extraction.extractedPages === 1 ? "" : "s"}`;
+    const truncatedLabel = extraction.truncated ? " (truncated)" : "";
     enqueueJob(
-      "image",
-      `${files.length} image${files.length === 1 ? "" : "s"}`,
+      "pdf",
+      `${file.name || "PDF"} · ${pageLabel}${truncatedLabel}`,
       {
-        type: "image",
-        imagesBase64,
+        type: "text",
+        text: extraction.text,
         language: "en",
       },
     );
-    refs.imageFile.value = "";
+    refs.pdfFile.value = "";
   } catch (error) {
-    enqueueErrorJob(
-      "image",
-      `${files.length} image${files.length === 1 ? "" : "s"}`,
-      toErrorMessage(error),
-    );
+    enqueueErrorJob("pdf", file.name || "PDF", toErrorMessage(error));
+  } finally {
+    refs.pdfUploadTrigger.disabled = false;
+    refs.pdfUploadTrigger.textContent = originalLabel;
   }
 }
 
@@ -1144,6 +1374,7 @@ async function refreshAfterUpload() {
     fetchDailyReportTasks(),
     fetchChecklistItems(),
     fetchFlashcards(),
+    fetchActivitySummary(),
   ]);
 
   if (results[0].status === "fulfilled") state.topics = results[0].value;
@@ -1166,6 +1397,13 @@ async function refreshAfterUpload() {
     state.flashcardsStatus = "Could not load today's flashcards.";
   }
 
+  if (results[5].status === "fulfilled") {
+    const activity = results[5].value || {};
+    state.activityHeatmap = normalizeActivityHeatmap(activity);
+    state.activityYear = normalizeActivityYear(activity);
+  }
+
+  renderActivityOverview();
   renderHomeStats();
   renderTopicCloud();
   renderDailyReports();
@@ -1896,21 +2134,78 @@ function sleep(ms) {
   });
 }
 
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const value = String(reader.result || "");
-      const parts = value.split(",");
-      if (parts.length < 2) {
-        reject(new Error("Failed to read file as base64"));
-        return;
-      }
-      resolve(parts[1]);
-    };
-    reader.onerror = () => {
-      reject(new Error("Failed to read selected file"));
-    };
-    reader.readAsDataURL(file);
+async function extractTextFromPdfFile(file) {
+  const fileName = String(file?.name || "");
+  const fileType = String(file?.type || "").toLowerCase();
+  const isPdf = fileType === "application/pdf" || /\.pdf$/i.test(fileName);
+  if (!isPdf) {
+    throw new Error("Please choose a PDF file.");
+  }
+
+  const fileBuffer = await file.arrayBuffer();
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
+      import.meta.url,
+    ).toString();
+  }
+
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(fileBuffer),
+    isEvalSupported: false,
   });
+
+  const document = await loadingTask.promise;
+  const totalPages = Number(document.numPages || 0);
+  const extractPages = Math.min(totalPages, MAX_PDF_PAGES);
+
+  const chunks = [];
+  let totalChars = 0;
+  let truncatedByChars = false;
+
+  for (let pageNumber = 1; pageNumber <= extractPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => String(item.str || "").trim())
+      .filter(Boolean)
+      .join(" ");
+
+    if (!pageText) continue;
+
+    const remainingChars = MAX_PDF_TEXT_CHARS - totalChars;
+    if (remainingChars <= 0) {
+      truncatedByChars = true;
+      break;
+    }
+
+    const clipped = pageText.slice(0, remainingChars);
+    if (!clipped) {
+      truncatedByChars = true;
+      break;
+    }
+
+    chunks.push(clipped);
+    totalChars += clipped.length;
+
+    if (clipped.length < pageText.length) {
+      truncatedByChars = true;
+      break;
+    }
+  }
+
+  const text = chunks.join("\n\n").replace(/\s+\n/g, "\n").trim();
+  if (!text) {
+    throw new Error(
+      "No extractable text was found in this PDF. If this is a scanned PDF, OCR is required.",
+    );
+  }
+
+  return {
+    text,
+    extractedPages: extractPages,
+    truncated: truncatedByChars || totalPages > extractPages,
+  };
 }

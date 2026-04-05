@@ -6,6 +6,7 @@ const COLLECTIONS = {
   knowledgeBase: "knowledge_base",
   dailyReport: "daily report",
   flashcards: "flashcards",
+  activity: "activity",
 };
 
 const GEMINI_EMBED_URL =
@@ -18,6 +19,29 @@ const APPWRITE_SYNC_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_APPWRITE_ENDPOINT = "https://sgp.cloud.appwrite.io/v1";
 const DAILY_FLASHCARD_SOURCE = "daily-reports-groq";
 const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
+const CLUSTER_CHUNK_MAX_CHARS = 12000;
+const CLUSTER_CHUNK_MIN_CHARS = 2500;
+const CLUSTER_FALLBACK_DEPTH = 2;
+const SEGMENT_PROCESS_CONCURRENCY = 4;
+const SEGMENT_PROCESS_LIMIT = 180;
+const LOCAL_FALLBACK_TOPIC = "general";
+const LOCAL_FALLBACK_SEGMENT_CHARS = 6000;
+const ACTIVITY_VECTOR = [1];
+const ACTIVITY_WINDOW_DAYS = 30;
+const ACTIVITY_MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
 function env(...names) {
   for (const name of names) {
@@ -30,6 +54,12 @@ function env(...names) {
 function requireValue(value, message) {
   if (!value) throw new Error(message);
   return value;
+}
+
+function redactSensitiveText(value) {
+  return String(value || "")
+    .replace(/([?&]key=)[^&\s"']+/gi, "$1[REDACTED]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[REDACTED_API_KEY]");
 }
 
 function getQdrantConfig() {
@@ -336,7 +366,10 @@ export async function invokeAppwriteFunction(functionId, payload) {
 
   const raw = await response.text();
   if (!response.ok) {
-    throw new Error(`Appwrite HTTP ${response.status}: ${raw.slice(0, 300)}`);
+    const sanitizedRaw = redactSensitiveText(raw);
+    throw new Error(
+      `Appwrite HTTP ${response.status}: ${sanitizedRaw.slice(0, 300)}`,
+    );
   }
 
   let execution;
@@ -347,8 +380,30 @@ export async function invokeAppwriteFunction(functionId, payload) {
   }
 
   if (execution.status !== "completed") {
+    const responseStatusCode =
+      execution.responseStatusCode ?? execution.statusCode ?? "";
+    const responseBody = String(
+      execution.responseBody ?? execution.response ?? execution.output ?? "",
+    )
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 260);
+    const errorsText = String(execution.errors || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+
+    const safeResponseBody = redactSensitiveText(responseBody);
+    const safeErrorsText = redactSensitiveText(errorsText);
+
+    const detailParts = [
+      responseStatusCode ? `statusCode ${responseStatusCode}` : "",
+      safeErrorsText ? `errors: ${safeErrorsText}` : "",
+      safeResponseBody ? `response: ${safeResponseBody}` : "",
+    ].filter(Boolean);
+
     throw new Error(
-      `Function execution failed with status: ${execution.status}`,
+      `Function execution failed with status: ${execution.status}${detailParts.length ? ` (${detailParts.join(" | ")})` : ""}`,
     );
   }
 
@@ -395,6 +450,28 @@ function normalizeDateKey(rawDate) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return value.slice(0, 10);
   return formatLocalDateKey(value);
+}
+
+function parseDateKey(dateKey) {
+  const value = String(dateKey || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function addDays(date, delta) {
+  const base = date instanceof Date ? date : new Date(date);
+  const next = new Date(base);
+  next.setDate(next.getDate() + delta);
+  return next;
+}
+
+function diffWholeDays(a, b) {
+  const start = parseDateKey(a);
+  const end = parseDateKey(b);
+  if (!start || !end) return 0;
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  return Math.round((end.getTime() - start.getTime()) / MS_PER_DAY);
 }
 
 function truncateText(value, maxChars) {
@@ -680,6 +757,196 @@ export async function fetchTopicCounts() {
   return counts;
 }
 
+export async function recordDailyActivity(source = "general") {
+  const dateKey = formatLocalDateKey(new Date());
+  const pointId = `activity-${dateKey}`;
+
+  await upsertPoints(COLLECTIONS.activity, [
+    {
+      id: pointId,
+      vector: ACTIVITY_VECTOR,
+      payload: {
+        date: dateKey,
+        year: Number(dateKey.slice(0, 4)),
+        source: String(source || "general").slice(0, 48),
+        updatedAt: new Date().toISOString(),
+      },
+    },
+  ]);
+}
+
+async function recordDailyActivitySafe(source) {
+  try {
+    await recordDailyActivity(source);
+  } catch (error) {
+    console.warn("[activity] Failed to record activity:", errorMessageFrom(error));
+  }
+}
+
+function computeYearStreakSummary(activeDateSet, year, todayDateKey) {
+  const prefix = `${year}-`;
+  const yearDates = [...activeDateSet].filter((dateKey) =>
+    String(dateKey).startsWith(prefix),
+  );
+  yearDates.sort();
+
+  const monthlyCounts = Array.from({ length: 12 }, () => 0);
+  for (const dateKey of yearDates) {
+    const month = Number(String(dateKey).slice(5, 7));
+    if (!Number.isFinite(month) || month < 1 || month > 12) continue;
+    monthlyCounts[month - 1] += 1;
+  }
+
+  let longestStreak = 0;
+  let runningStreak = 0;
+  let prevDateKey = "";
+
+  for (const dateKey of yearDates) {
+    if (prevDateKey && diffWholeDays(prevDateKey, dateKey) === 1) {
+      runningStreak += 1;
+    } else {
+      runningStreak = 1;
+    }
+
+    if (runningStreak > longestStreak) {
+      longestStreak = runningStreak;
+    }
+
+    prevDateKey = dateKey;
+  }
+
+  let currentStreak = 0;
+  let cursor = parseDateKey(todayDateKey);
+
+  while (cursor && cursor.getFullYear() === year) {
+    const cursorKey = formatLocalDateKey(cursor);
+    if (!activeDateSet.has(cursorKey)) break;
+    currentStreak += 1;
+    cursor = addDays(cursor, -1);
+  }
+
+  let bestMonthIndex = 0;
+  let bestMonthCount = 0;
+  for (let index = 0; index < monthlyCounts.length; index += 1) {
+    if (monthlyCounts[index] > bestMonthCount) {
+      bestMonthCount = monthlyCounts[index];
+      bestMonthIndex = index;
+    }
+  }
+
+  return {
+    year,
+    activeDays: yearDates.length,
+    currentStreak,
+    longestStreak,
+    bestMonth: ACTIVITY_MONTH_LABELS[bestMonthIndex],
+    bestMonthActiveDays: bestMonthCount,
+    todayActive: activeDateSet.has(todayDateKey),
+    monthlyCounts,
+  };
+}
+
+function buildRecentHeatmap(activeDateSet, todayDateKey) {
+  const today = parseDateKey(todayDateKey);
+  if (!today) {
+    return {
+      year: new Date().getFullYear(),
+      totalDays: ACTIVITY_WINDOW_DAYS,
+      activeDays: 0,
+      weekColumns: 0,
+      monthLabels: [],
+      cells: [],
+    };
+  }
+
+  const startDate = addDays(today, -(ACTIVITY_WINDOW_DAYS - 1));
+  const startOffset = startDate.getDay();
+  const cells = [];
+
+  for (let offset = 0; offset < startOffset; offset += 1) {
+    cells.push({ date: null, active: false, count: 0, future: false });
+  }
+
+  let activeDays = 0;
+
+  for (let day = 0; day < ACTIVITY_WINDOW_DAYS; day += 1) {
+    const currentDate = addDays(startDate, day);
+    const dateKey = formatLocalDateKey(currentDate);
+    const active = activeDateSet.has(dateKey);
+
+    if (active) activeDays += 1;
+
+    cells.push({
+      date: dateKey,
+      active,
+      count: active ? 1 : 0,
+      future: false,
+    });
+  }
+
+  while (cells.length % 7 !== 0) {
+    cells.push({ date: null, active: false, count: 0, future: false });
+  }
+
+  return {
+    year: today.getFullYear(),
+    totalDays: ACTIVITY_WINDOW_DAYS,
+    activeDays,
+    weekColumns: Math.max(1, Math.ceil(cells.length / 7)),
+    monthLabels: [],
+    startDate: formatLocalDateKey(startDate),
+    endDate: todayDateKey,
+    cells,
+  };
+}
+
+export async function fetchActivitySummary() {
+  const points = await scrollAll(COLLECTIONS.activity);
+  const activeDates = new Set(
+    points
+      .map((point) => normalizeDateKey(point.payload?.date))
+      .filter(Boolean),
+  );
+
+  const today = parseDateKey(formatLocalDateKey(new Date()));
+  if (!today) {
+    return {
+      heatmap: {
+        year: new Date().getFullYear(),
+        totalDays: ACTIVITY_WINDOW_DAYS,
+        activeDays: 0,
+        weekColumns: 0,
+        monthLabels: [],
+        cells: [],
+      },
+      year: {
+        year: new Date().getFullYear(),
+        activeDays: 0,
+        currentStreak: 0,
+        longestStreak: 0,
+        bestMonth: "Jan",
+        bestMonthActiveDays: 0,
+        todayActive: false,
+        monthlyCounts: Array.from({ length: 12 }, () => 0),
+      },
+    };
+  }
+
+  const todayDateKey = formatLocalDateKey(today);
+  const activeYear = today.getFullYear();
+  const heatmap = buildRecentHeatmap(activeDates, todayDateKey);
+  const yearSummary = computeYearStreakSummary(
+    activeDates,
+    activeYear,
+    todayDateKey,
+  );
+
+  return {
+    heatmap,
+    year: yearSummary,
+  };
+}
+
 export async function runChat(message) {
   const query = String(message || "").trim();
   if (!query) throw new Error("Message is required");
@@ -734,6 +1001,7 @@ Instructions:
 - Keep the answer concise but complete.`;
 
   const answer = await callGemini(prompt);
+  await recordDailyActivitySafe("chat");
   return { answer, topics };
 }
 
@@ -784,6 +1052,7 @@ export async function generateDailyFlashcards() {
 
   const cached = await fetchCachedDailyFlashcards(dateKey, signature);
   if (cached.length) {
+    await recordDailyActivitySafe("flashcards");
     return { flashcards: cached, cached: true };
   }
 
@@ -815,6 +1084,8 @@ export async function generateDailyFlashcards() {
 
   await upsertPoints(COLLECTIONS.flashcards, points);
 
+  await recordDailyActivitySafe("flashcards");
+
   return {
     flashcards: generated.map((card, index) => ({
       id: points[index].id,
@@ -837,6 +1108,8 @@ export async function generateCustomReport(topics) {
   if (!response.success) {
     throw new Error(response.error || "Custom report generation failed");
   }
+
+  await recordDailyActivitySafe("custom-report");
 
   return {
     report: response.report,
@@ -909,12 +1182,357 @@ Instructions:
 
   const report = await callGemini(prompt);
 
+  await recordDailyActivitySafe("report");
+
   return {
     report,
     stats: {
       memoryPoints: textByContent.size,
       knowledgePoints: knowledgeEntries.length,
     },
+  };
+}
+
+function splitTextIntoSizedChunks(text, maxChars) {
+  const limit = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : 12000;
+  const source = String(text || "").replace(/\r/g, "").trim();
+  if (!source) return [];
+
+  const blocks = source
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const inputBlocks = blocks.length ? blocks : [source];
+  const chunks = [];
+  let current = "";
+
+  const flush = () => {
+    const value = current.trim();
+    if (value) chunks.push(value);
+    current = "";
+  };
+
+  const appendPiece = (piece) => {
+    const value = String(piece || "").trim();
+    if (!value) return;
+    if (!current) {
+      current = value;
+      return;
+    }
+
+    const candidate = `${current}\n\n${value}`;
+    if (candidate.length <= limit) {
+      current = candidate;
+      return;
+    }
+
+    flush();
+    current = value;
+  };
+
+  const appendOversized = (blockText) => {
+    const sentenceParts = String(blockText || "").match(/[^.!?]+[.!?]?/g) || [String(blockText || "")];
+
+    for (const rawSentence of sentenceParts) {
+      const sentence = rawSentence.trim();
+      if (!sentence) continue;
+
+      if (sentence.length <= limit) {
+        appendPiece(sentence);
+        continue;
+      }
+
+      const words = sentence.split(/\s+/).filter(Boolean);
+      let wordChunk = "";
+
+      for (const word of words) {
+        const candidate = wordChunk ? `${wordChunk} ${word}` : word;
+        if (candidate.length <= limit) {
+          wordChunk = candidate;
+          continue;
+        }
+
+        if (wordChunk) appendPiece(wordChunk);
+
+        if (word.length > limit) {
+          for (let index = 0; index < word.length; index += limit) {
+            appendPiece(word.slice(index, index + limit));
+          }
+          wordChunk = "";
+          continue;
+        }
+
+        wordChunk = word;
+      }
+
+      if (wordChunk) appendPiece(wordChunk);
+    }
+  };
+
+  for (const block of inputBlocks) {
+    if (block.length <= limit) {
+      appendPiece(block);
+      continue;
+    }
+
+    appendOversized(block);
+  }
+
+  flush();
+  return chunks;
+}
+
+function normalizeClusterSegments(clusterResponse) {
+  const segments = Array.isArray(clusterResponse?.segments)
+    ? clusterResponse.segments
+    : [];
+
+  return segments
+    .map((segment) => String(segment?.content || "").trim())
+    .filter(Boolean);
+}
+
+async function clusterChunkWithFallback(chunk, clusteringFunctionId, depth = 0) {
+  const textChunk = String(chunk || "").trim();
+  if (!textChunk) return [];
+
+  try {
+    const clusterResponse = await invokeAppwriteFunction(clusteringFunctionId, {
+      paragraph: textChunk,
+    });
+
+    if (!clusterResponse.success) {
+      throw new Error(clusterResponse.error || "Text clustering failed");
+    }
+
+    const clustered = normalizeClusterSegments(clusterResponse);
+    return clustered.length ? clustered : [textChunk];
+  } catch (error) {
+    if (depth >= CLUSTER_FALLBACK_DEPTH || textChunk.length <= CLUSTER_CHUNK_MIN_CHARS) {
+      return [textChunk];
+    }
+
+    const smallerSize = Math.max(
+      CLUSTER_CHUNK_MIN_CHARS,
+      Math.floor(textChunk.length / 2),
+    );
+    const subChunks = splitTextIntoSizedChunks(textChunk, smallerSize);
+
+    if (subChunks.length <= 1) {
+      return [textChunk];
+    }
+
+    const nestedSegments = [];
+    for (const subChunk of subChunks) {
+      const clusteredSubChunk = await clusterChunkWithFallback(
+        subChunk,
+        clusteringFunctionId,
+        depth + 1,
+      );
+      nestedSegments.push(...clusteredSubChunk);
+    }
+
+    return nestedSegments;
+  }
+}
+
+async function clusterTextForUpload(extractedText) {
+  const clusteringFunctionId = getFunctionId("clustering");
+  const chunks = splitTextIntoSizedChunks(extractedText, CLUSTER_CHUNK_MAX_CHARS);
+  if (!chunks.length) {
+    throw new Error("No text chunks available for clustering");
+  }
+
+  const mergedSegments = [];
+
+  for (const chunk of chunks) {
+    const chunkSegments = await clusterChunkWithFallback(
+      chunk,
+      clusteringFunctionId,
+      0,
+    );
+    mergedSegments.push(...chunkSegments);
+
+    if (mergedSegments.length >= SEGMENT_PROCESS_LIMIT) break;
+  }
+
+  const uniqueSegments = [];
+  const seen = new Set();
+
+  for (const segment of mergedSegments) {
+    const normalized = String(segment || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+
+    seen.add(normalized);
+    uniqueSegments.push(normalized.slice(0, CLUSTER_CHUNK_MAX_CHARS));
+
+    if (uniqueSegments.length >= SEGMENT_PROCESS_LIMIT) break;
+  }
+
+  if (!uniqueSegments.length) {
+    throw new Error("No usable segments were produced from extracted text");
+  }
+
+  return uniqueSegments;
+}
+
+function errorMessageFrom(error) {
+  if (error instanceof Error) return error.message;
+  return String(error || "Unknown error");
+}
+
+async function processSegmentsWithConcurrency(segments) {
+  const processSegmentFunctionId = getFunctionId("processSegment");
+  const limitedSegments = Array.isArray(segments)
+    ? segments.slice(0, SEGMENT_PROCESS_LIMIT)
+    : [];
+
+  if (!limitedSegments.length) {
+    return {
+      processResults: [],
+      failedSegments: 0,
+      attemptedSegments: 0,
+      firstError: "",
+    };
+  }
+
+  const concurrency = Math.min(
+    SEGMENT_PROCESS_CONCURRENCY,
+    limitedSegments.length,
+  );
+
+  let cursor = 0;
+  const results = [];
+  const failures = [];
+
+  async function worker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= limitedSegments.length) return;
+
+      try {
+        const response = await invokeAppwriteFunction(processSegmentFunctionId, {
+          segment: limitedSegments[index],
+        });
+        results.push(response);
+      } catch (error) {
+        failures.push(errorMessageFrom(error));
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  return {
+    processResults: results,
+    failedSegments: failures.length,
+    attemptedSegments: limitedSegments.length,
+    firstError: failures[0] || "",
+  };
+}
+
+async function ensureTopicExists(topicText) {
+  const topic = String(topicText || "")
+    .trim()
+    .toLowerCase();
+  if (!topic) return;
+
+  const existing = await scrollAll(COLLECTIONS.topics);
+  const hasTopic = existing.some(
+    (point) =>
+      String(point.payload?.text || "")
+        .trim()
+        .toLowerCase() === topic,
+  );
+
+  if (hasTopic) return;
+
+  const topicVector = await embedText(topic);
+  await upsertPoints(COLLECTIONS.topics, [
+    {
+      id: createQdrantPointId(),
+      vector: topicVector,
+      payload: { text: topic },
+    },
+  ]);
+}
+
+async function processSegmentsLocally(segments, language = "en") {
+  const limitedSegments = Array.isArray(segments)
+    ? segments.slice(0, SEGMENT_PROCESS_LIMIT)
+    : [];
+
+  if (!limitedSegments.length) {
+    return {
+      processResults: [],
+      failedSegments: 0,
+      attemptedSegments: 0,
+      firstError: "",
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const dateKey = formatLocalDateKey(nowIso);
+  const points = [];
+  const processResults = [];
+  const failures = [];
+
+  for (let index = 0; index < limitedSegments.length; index += 1) {
+    const segment = String(limitedSegments[index] || "")
+      .trim()
+      .slice(0, LOCAL_FALLBACK_SEGMENT_CHARS);
+    if (!segment) continue;
+
+    try {
+      const vector = await embedText(segment);
+      points.push({
+        id: createQdrantPointId(index),
+        vector,
+        payload: {
+          text: segment,
+          topic: LOCAL_FALLBACK_TOPIC,
+          date: dateKey,
+          language,
+          source: "local-fallback",
+          createdAt: nowIso,
+        },
+      });
+      processResults.push({
+        success: true,
+        memoryStored: 1,
+        knowledgeBaseStored: 0,
+        skipped: false,
+        topics: [{ topic: LOCAL_FALLBACK_TOPIC }],
+        source: "local-fallback",
+      });
+    } catch (error) {
+      failures.push(errorMessageFrom(error));
+    }
+  }
+
+  if (!points.length) {
+    const detail = failures[0] || "Unable to embed extracted segments locally";
+    throw new Error(`Local fallback ingestion failed. ${detail}`);
+  }
+
+  await upsertPoints(COLLECTIONS.memory, points);
+
+  try {
+    await ensureTopicExists(LOCAL_FALLBACK_TOPIC);
+  } catch (error) {
+    console.warn("[upload] Failed to upsert fallback topic:", errorMessageFrom(error));
+  }
+
+  return {
+    processResults,
+    failedSegments: failures.length,
+    attemptedSegments: limitedSegments.length,
+    firstError: failures[0] || "",
   };
 }
 
@@ -975,28 +1593,32 @@ export async function runUploadPipeline(payload) {
     throw new Error("No text was extracted for processing");
   }
 
-  const clusterResponse = await invokeAppwriteFunction(
-    getFunctionId("clustering"),
-    {
-      paragraph: extractedText,
-    },
-  );
+  const segments = await clusterTextForUpload(extractedText);
+  let processingResult = await processSegmentsWithConcurrency(segments);
+  let usedLocalFallback = false;
 
-  if (!clusterResponse.success) {
-    throw new Error(clusterResponse.error || "Text clustering failed");
+  if (!processingResult.processResults.length) {
+    const fallbackResult = await processSegmentsLocally(segments, language);
+    processingResult = {
+      processResults: fallbackResult.processResults,
+      failedSegments: processingResult.failedSegments + fallbackResult.failedSegments,
+      attemptedSegments: Math.max(
+        processingResult.attemptedSegments,
+        fallbackResult.attemptedSegments,
+      ),
+      firstError: processingResult.firstError || fallbackResult.firstError,
+    };
+    usedLocalFallback = true;
   }
 
-  const segments = (clusterResponse.segments || [])
-    .map((segment) => String(segment.content || "").trim())
-    .filter(Boolean);
+  const {
+    processResults,
+    failedSegments,
+    attemptedSegments,
+    firstError,
+  } = processingResult;
 
-  const processResults = await Promise.all(
-    segments.map((segment) =>
-      invokeAppwriteFunction(getFunctionId("processSegment"), { segment }),
-    ),
-  );
-
-  const topics = [
+  const derivedTopics = [
     ...new Set(
       processResults
         .flatMap((result) =>
@@ -1006,6 +1628,12 @@ export async function runUploadPipeline(payload) {
         .filter(Boolean),
     ),
   ];
+
+  const topics = derivedTopics.length
+    ? derivedTopics
+    : usedLocalFallback
+      ? [LOCAL_FALLBACK_TOPIC]
+      : [];
 
   const summary = {
     memoryStored: processResults.reduce(
@@ -1019,7 +1647,16 @@ export async function runUploadPipeline(payload) {
     skipped: processResults.filter((result) => result.skipped).length,
     processed: processResults.length,
     segments: segments.length,
+    failedSegments,
+    attemptedSegments,
+    usedLocalFallback,
+    warning:
+      usedLocalFallback && firstError
+        ? `Appwrite segment processing failed; local fallback was used. ${firstError}`
+        : "",
   };
+
+  await recordDailyActivitySafe("upload");
 
   return {
     extractedText,

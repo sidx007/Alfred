@@ -54,6 +54,7 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 html {
@@ -62,6 +63,7 @@ html {
 }
 
 body {
+  height: 100dvh;
   min-height: 100%;
   background:
     radial-gradient(
@@ -81,6 +83,7 @@ body {
 
 #app {
   height: 100%;
+  overflow: hidden;
 }
 
 .glass {
@@ -93,13 +96,15 @@ body {
 
 .portal-shell {
   min-height: 100dvh;
-  height: auto;
+  height: 100dvh;
+  max-height: 100dvh;
   max-width: 1240px;
   margin: 0 auto;
   padding: 18px 18px max(112px, calc(96px + env(safe-area-inset-bottom)));
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow: hidden;
 }
 
 .masthead {
@@ -213,13 +218,14 @@ body {
 .panel-stack {
   flex: 1;
   min-height: 0;
-  position: relative;
+  display: flex;
   overflow: hidden;
 }
 
 .panel {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  inset: auto;
+  width: 100%;
   border-radius: var(--radius-xl);
   padding: 18px;
   display: none;
@@ -230,6 +236,7 @@ body {
 
 .panel.is-active {
   display: flex;
+  flex: 1;
 }
 
 .panel-head {
@@ -277,6 +284,197 @@ body {
   font-weight: 700;
 }
 
+.activity-overview {
+  margin-bottom: 12px;
+}
+
+.activity-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.activity-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.activity-card-head h3 {
+  margin: 0;
+  font-size: 0.96rem;
+  letter-spacing: 0.01em;
+}
+
+.activity-card-head p {
+  margin: 4px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.activity-pill {
+  border-radius: 999px;
+  border: 1px solid rgba(189, 30, 30, 0.35);
+  background: rgba(189, 30, 30, 0.12);
+  color: var(--accent);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 0.76rem;
+  padding: 6px 10px;
+}
+
+.activity-heatmap-toggle {
+  --week-columns: 53;
+  --activity-gap: 2px;
+  --activity-cell-size: calc(
+    clamp(
+      7px,
+      (100% - ((var(--week-columns) - 1) * var(--activity-gap))) /
+        var(--week-columns),
+      14px
+    )
+  );
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.activity-metric-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.activity-metric {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.36);
+  padding: 10px 12px;
+}
+
+[data-color-scheme="dark"] .activity-metric {
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.activity-metric h4 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.activity-metric p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+}
+
+.activity-month-labels {
+  display: grid;
+  grid-template-columns: repeat(var(--week-columns), var(--activity-cell-size));
+  gap: var(--activity-gap);
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.activity-month-label {
+  font-size: 0.64rem;
+  color: var(--ink-faint);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  letter-spacing: 0.03em;
+  transform: translateX(-1px);
+}
+
+.activity-heatmap-grid {
+  display: grid;
+  grid-template-rows: repeat(7, var(--activity-cell-size));
+  grid-template-columns: repeat(var(--week-columns), var(--activity-cell-size));
+  grid-auto-flow: column;
+  gap: var(--activity-gap);
+  width: 100%;
+}
+
+.activity-cell {
+  width: var(--activity-cell-size);
+  height: var(--activity-cell-size);
+  border-radius: 2px;
+  border: 1px solid var(--line-strong);
+  background: rgba(35, 24, 20, 0.18);
+}
+
+[data-color-scheme="dark"] .activity-cell {
+  background: rgba(249, 244, 242, 0.16);
+}
+
+.activity-cell.is-empty {
+  border-color: transparent;
+  background: transparent;
+}
+
+.activity-cell.is-idle {
+  background: rgba(35, 24, 20, 0.26);
+}
+
+[data-color-scheme="dark"] .activity-cell.is-idle {
+  background: rgba(249, 244, 242, 0.26);
+}
+
+.activity-cell.is-future {
+  background: rgba(35, 24, 20, 0.1);
+}
+
+[data-color-scheme="dark"] .activity-cell.is-future {
+  background: rgba(249, 244, 242, 0.1);
+}
+
+.activity-cell.is-active {
+  border-color: rgba(239, 68, 68, 0.9);
+  background: linear-gradient(145deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.32);
+}
+
+.activity-hint {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ink-faint);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+}
+
+.activity-streak-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.activity-streak-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.36);
+  padding: 10px 12px;
+}
+
+[data-color-scheme="dark"] .activity-streak-item {
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.activity-streak-item h4 {
+  margin: 0;
+  font-size: 1.12rem;
+}
+
+.activity-streak-item p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+}
+
 .home-grid {
   flex: 1;
   min-height: 0;
@@ -307,15 +505,7 @@ body {
 }
 
 .tile-text {
-  grid-column: span 6;
-}
-
-.tile-audio {
-  grid-column: span 3;
-}
-
-.tile-image {
-  grid-column: span 3;
+  grid-column: span 12;
 }
 
 .tile-topics {
@@ -361,6 +551,41 @@ textarea {
   background: var(--accent-soft);
   color: var(--accent);
   border-color: transparent;
+}
+
+.capture-entry-unified {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.capture-entry-unified textarea {
+  min-height: 128px;
+}
+
+.capture-side-actions {
+  width: clamp(132px, 16vw, 176px);
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+}
+
+.capture-side-actions .ghost-btn,
+.capture-side-actions .primary-btn {
+  width: 100%;
+  border-radius: var(--radius-md);
+}
+
+.capture-file-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
 }
 
 .topic-cloud {
@@ -1199,8 +1424,6 @@ textarea {
     grid-column: span 12;
   }
 
-  .tile-audio,
-  .tile-image,
   .tile-topics {
     grid-column: span 6;
   }
@@ -1216,6 +1439,14 @@ textarea {
 
 @media (max-width: 980px) {
   .home-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .activity-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .activity-streak-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1259,8 +1490,33 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .tile-audio,
-  .tile-image,
+  .activity-heatmap-grid {
+    --activity-gap: 2px;
+    --activity-cell-size: clamp(
+      6px,
+      (100% - ((var(--week-columns) - 1) * var(--activity-gap))) /
+        var(--week-columns),
+      10px
+    );
+  }
+
+  .activity-month-labels {
+    --activity-gap: 2px;
+  }
+
+  .activity-month-label {
+    font-size: 0.58rem;
+  }
+
+  .activity-cell {
+    border-radius: 1px;
+  }
+
+  .activity-metric-strip,
+  .activity-streak-grid {
+    grid-template-columns: 1fr;
+  }
+
   .tile-topics {
     grid-column: span 12;
   }
@@ -1271,6 +1527,16 @@ textarea {
 
   .chat-entry {
     grid-template-columns: 1fr;
+  }
+
+  .capture-entry-unified {
+    grid-template-columns: 1fr;
+  }
+
+  .capture-side-actions {
+    width: 100%;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr;
   }
 
   .check-item {
@@ -1353,18 +1619,7 @@ textarea {
 }
 
 @media (max-height: 760px) {
-  .portal-shell {
-    padding-bottom: 14px;
-  }
-
   .rsvp-stage {
     min-height: 150px;
-  }
-
-  .dock {
-    position: static;
-    transform: none;
-    left: auto;
-    width: 100%;
   }
 }
