@@ -1,4 +1,4 @@
-import handler from "../../api/chat.js";
+import handler from "../../backend-api/chat.js";
 
 export const config = {
   api: {

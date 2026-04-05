@@ -1,4 +1,4 @@
-import handler from "../../api/topic-counts.js";
+import handler from "../../backend-api/topic-counts.js";
 
 export const config = {
   api: {

@@ -1,4 +1,4 @@
-import handler from "../../api/activity.js";
+import handler from "../../backend-api/activity.js";
 
 export const config = {
   api: {

@@ -1,4 +1,4 @@
-import handler from "../../api/custom-report.js";
+import handler from "../../backend-api/custom-report.js";
 
 export const config = {
   api: {

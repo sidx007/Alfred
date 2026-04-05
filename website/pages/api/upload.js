@@ -1,4 +1,4 @@
-import handler from "../../api/upload.js";
+import handler from "../../backend-api/upload.js";
 
 export const config = {
   api: {

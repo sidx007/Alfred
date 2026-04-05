@@ -1,4 +1,4 @@
-import handler from "../../api/health.js";
+import handler from "../../backend-api/health.js";
 
 export const config = {
   api: {

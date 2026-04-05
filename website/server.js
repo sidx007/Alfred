@@ -10,7 +10,7 @@ import {
     fetchFlashcards as fetchDailyFlashcards,
     generateDailyFlashcards,
     runUploadPipeline,
-} from "./api/_lib/backend.js";
+} from "./backend-api/_lib/backend.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

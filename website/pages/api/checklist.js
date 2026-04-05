@@ -1,4 +1,4 @@
-import handler from "../../api/checklist.js";
+import handler from "../../backend-api/checklist.js";
 
 export const config = {
   api: {

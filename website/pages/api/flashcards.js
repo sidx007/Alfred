@@ -1,4 +1,4 @@
-import handler from "../../api/flashcards.js";
+import handler from "../../backend-api/flashcards.js";
 
 export const config = {
   api: {
